@@ -10,11 +10,13 @@ function App() {
       </header>
 
       <div className="flex flex-1 overflow-hidden">
-        <div className="flex-1 relative">
+        {/* Canvas takes most of the screen */}
+        <div className="flex-[4] relative">
           <CanvasScene />
         </div>
 
-        <div className="w-96 border-l border-zinc-800 bg-zinc-900 overflow-auto p-6">
+        {/* Narrower sidebar */}
+        <div className="w-80 border-l border-zinc-800 bg-zinc-900 overflow-auto p-6">
           <Controls />
         </div>
       </div>
