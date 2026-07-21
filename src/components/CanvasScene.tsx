@@ -1,35 +1,27 @@
 import { Canvas, useFrame } from '@react-three/fiber';
-import { OrbitControls } from '@react-three/drei';
+import { OrbitControls, Stars, Grid } from '@react-three/drei';
 import { Physics, RigidBody } from '@react-three/rapier';
 import { useState, useRef, useEffect } from 'react';
 import type { RapierRigidBody } from '@react-three/rapier';
 
-export function CanvasScene() {
-  const [speed, setSpeed] = useState(16);
-  const [angle, setAngle] = useState(45);
-  const [isLaunched, setIsLaunched] = useState(false);
-
+// This component lives INSIDE the Canvas
+function SceneContent({
+  isLaunched,
+  speed,
+  angle,
+  onStatsUpdate,
+}: {
+  isLaunched: boolean;
+  speed: number;
+  angle: number;
+  onStatsUpdate: (stats: any) => void;
+}) {
   const bodyRef = useRef<RapierRigidBody>(null);
   const hasLaunched = useRef(false);
+  const startTime = useRef(0);
+  const maxHeightRef = useRef(0);
 
-  const launch = () => {
-    if (isLaunched) return;
-    hasLaunched.current = false;
-    setIsLaunched(true);
-  };
-
-  const reset = () => {
-    setIsLaunched(false);
-    hasLaunched.current = false;
-
-    if (bodyRef.current) {
-      bodyRef.current.setTranslation({ x: 0, y: 6, z: 0 }, true);
-      bodyRef.current.setLinvel({ x: 0, y: 0, z: 0 }, true);
-      bodyRef.current.setAngvel({ x: 0, y: 0, z: 0 }, true);
-    }
-  };
-
-  // Apply velocity once when launched
+  // Apply velocity when launched
   useEffect(() => {
     if (!isLaunched || !bodyRef.current || hasLaunched.current) return;
 
@@ -43,52 +35,150 @@ export function CanvasScene() {
         bodyRef.current.setLinvel({ x: vx, y: vy, z: 0 }, true);
         bodyRef.current.setAngvel({ x: 0, y: 0, z: 0 }, true);
         hasLaunched.current = true;
+        startTime.current = performance.now();
+        maxHeightRef.current = 0;
       }
     }, 30);
 
     return () => clearTimeout(timer);
   }, [isLaunched, speed, angle]);
 
+  // Reset when isLaunched becomes false
+  useEffect(() => {
+    if (!isLaunched && bodyRef.current) {
+      bodyRef.current.setTranslation({ x: 0, y: 6, z: 0 }, true);
+      bodyRef.current.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      bodyRef.current.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      hasLaunched.current = false;
+    }
+  }, [isLaunched]);
+
+  // Live stats (this is now safely inside the Canvas)
+  useFrame(() => {
+    if (!bodyRef.current || !isLaunched) return;
+
+    const pos = bodyRef.current.translation();
+    const dist = Math.sqrt(pos.x * pos.x);
+    const height = Math.max(0, pos.y - 0.6);
+
+    if (height > maxHeightRef.current) {
+      maxHeightRef.current = height;
+    }
+
+    const time = (performance.now() - startTime.current) / 1000;
+
+    onStatsUpdate({
+      distance: dist,
+      height,
+      maxHeight: maxHeightRef.current,
+      time,
+    });
+  });
+
+  return (
+    <>
+      <ambientLight intensity={0.55} />
+      <directionalLight position={[20, 30, 15]} intensity={1.4} castShadow />
+
+      <Physics gravity={[0, -9.81, 0]}>
+        <RigidBody type="fixed" position={[0, -1, 0]}>
+          <mesh receiveShadow>
+            <boxGeometry args={[120, 2, 120]} />
+            <meshStandardMaterial color="#1e2937" />
+          </mesh>
+        </RigidBody>
+
+        {/* Origin */}
+        <mesh position={[0, 0.15, 0]}>
+          <cylinderGeometry args={[1.4, 1.4, 0.3, 32]} />
+          <meshStandardMaterial color="#3b82f6" />
+        </mesh>
+        <mesh position={[0, 0.32, 0]}>
+          <boxGeometry args={[0.18, 0.08, 2.8]} />
+          <meshStandardMaterial color="#93c5fd" />
+        </mesh>
+        <mesh position={[0, 0.32, 0]}>
+          <boxGeometry args={[2.8, 0.08, 0.18]} />
+          <meshStandardMaterial color="#93c5fd" />
+        </mesh>
+
+        {/* Ball */}
+        <RigidBody
+          ref={bodyRef}
+          position={[0, 6, 0]}
+          colliders="ball"
+          restitution={0.25}
+          friction={0.4}
+        >
+          <mesh castShadow>
+            <sphereGeometry args={[0.55]} />
+            <meshStandardMaterial
+              color="#ef4444"
+              emissive="#f87171"
+              emissiveIntensity={0.45}
+            />
+          </mesh>
+        </RigidBody>
+      </Physics>
+
+      <Grid
+        args={[100, 100]}
+        cellSize={2}
+        cellThickness={0.5}
+        cellColor="#334155"
+        sectionSize={10}
+        sectionThickness={1.1}
+        sectionColor="#475569"
+        fadeDistance={90}
+        position={[0, 0.02, 0]}
+      />
+
+      <OrbitControls
+        target={[15, 5, 0]}
+        enablePan
+        enableZoom
+        enableRotate
+        maxPolarAngle={Math.PI / 2.05}
+      />
+      <Stars radius={300} depth={50} count={2500} factor={3} fade />
+    </>
+  );
+}
+
+export function CanvasScene() {
+  const [speed, setSpeed] = useState(16);
+  const [angle, setAngle] = useState(45);
+  const [isLaunched, setIsLaunched] = useState(false);
+  const [stats, setStats] = useState({
+    distance: 0,
+    height: 0,
+    maxHeight: 0,
+    time: 0,
+  });
+
+  const launch = () => {
+    if (!isLaunched) setIsLaunched(true);
+  };
+
+  const reset = () => {
+    setIsLaunched(false);
+    setStats({ distance: 0, height: 0, maxHeight: 0, time: 0 });
+  };
+
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative', background: '#0a0a0a' }}>
-      <Canvas camera={{ position: [25, 12, 25], fov: 40 }}>
-        <ambientLight intensity={0.6} />
-        <directionalLight position={[15, 25, 10]} intensity={1.3} />
-
-        <Physics gravity={[0, -9.81, 0]}>
-          {/* Ground */}
-          <RigidBody type="fixed" position={[0, -1, 0]}>
-            <mesh>
-              <boxGeometry args={[80, 2, 80]} />
-              <meshStandardMaterial color="#1e2937" />
-            </mesh>
-          </RigidBody>
-
-          {/* Origin marker */}
-          <mesh position={[0, 0.15, 0]}>
-            <cylinderGeometry args={[1.2, 1.2, 0.3, 32]} />
-            <meshStandardMaterial color="#3b82f6" />
-          </mesh>
-
-          {/* Projectile */}
-          <RigidBody
-            ref={bodyRef}
-            position={[0, 6, 0]}
-            colliders="ball"
-          >
-            <mesh>
-              <sphereGeometry args={[0.6]} />
-              <meshStandardMaterial color="#ef4444" emissive="#f87171" emissiveIntensity={0.4} />
-            </mesh>
-          </RigidBody>
-        </Physics>
-
-        <OrbitControls target={[12, 4, 0]} />
+      <Canvas camera={{ position: [28, 14, 28], fov: 40 }}>
+        <SceneContent
+          isLaunched={isLaunched}
+          speed={speed}
+          angle={angle}
+          onStatsUpdate={setStats}
+        />
       </Canvas>
 
       {/* Controls */}
-      <div className="absolute top-6 left-6 bg-black/90 p-5 rounded-xl border border-zinc-700 w-72 space-y-4 z-50">
-        <h3 className="font-semibold text-lg">Projectile Controls</h3>
+      <div className="absolute top-6 left-6 bg-black/90 p-5 rounded-xl border border-zinc-700 w-80 space-y-4 z-50">
+        <h3 className="font-semibold text-lg">Projectile Motion</h3>
 
         <div>
           <label className="text-sm text-zinc-400">
@@ -134,6 +224,25 @@ export function CanvasScene() {
           >
             Reset
           </button>
+        </div>
+
+        <div className="pt-4 border-t border-zinc-700 space-y-2 text-sm">
+          <div className="flex justify-between">
+            <span className="text-zinc-400">Distance</span>
+            <span className="font-mono">{stats.distance.toFixed(1)} m</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-zinc-400">Current Height</span>
+            <span className="font-mono">{stats.height.toFixed(1)} m</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-zinc-400">Max Height</span>
+            <span className="font-mono">{stats.maxHeight.toFixed(1)} m</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-zinc-400">Time</span>
+            <span className="font-mono">{stats.time.toFixed(2)} s</span>
+          </div>
         </div>
       </div>
     </div>
