@@ -1,19 +1,20 @@
 import { Canvas, useFrame } from '@react-three/fiber';
-import { OrbitControls, Stars, Grid } from '@react-three/drei';
+import { OrbitControls, Stars, Grid, Trail } from '@react-three/drei';
 import { Physics, RigidBody } from '@react-three/rapier';
 import { useState, useRef, useEffect } from 'react';
 import type { RapierRigidBody } from '@react-three/rapier';
 
-// This component lives INSIDE the Canvas
 function SceneContent({
   isLaunched,
   speed,
   angle,
+  ballRadius,
   onStatsUpdate,
 }: {
   isLaunched: boolean;
   speed: number;
   angle: number;
+  ballRadius: number;
   onStatsUpdate: (stats: any) => void;
 }) {
   const bodyRef = useRef<RapierRigidBody>(null);
@@ -21,7 +22,9 @@ function SceneContent({
   const startTime = useRef(0);
   const maxHeightRef = useRef(0);
 
-  // Apply velocity when launched
+  // Launch height = ball radius + small clearance
+  const launchY = ballRadius + 0.15;
+
   useEffect(() => {
     if (!isLaunched || !bodyRef.current || hasLaunched.current) return;
 
@@ -31,9 +34,10 @@ function SceneContent({
         const vx = speed * Math.cos(rad);
         const vy = speed * Math.sin(rad);
 
-        bodyRef.current.setTranslation({ x: 0, y: 6, z: 0 }, true);
+        bodyRef.current.setTranslation({ x: 0, y: launchY, z: 0 }, true);
         bodyRef.current.setLinvel({ x: vx, y: vy, z: 0 }, true);
         bodyRef.current.setAngvel({ x: 0, y: 0, z: 0 }, true);
+
         hasLaunched.current = true;
         startTime.current = performance.now();
         maxHeightRef.current = 0;
@@ -41,25 +45,23 @@ function SceneContent({
     }, 30);
 
     return () => clearTimeout(timer);
-  }, [isLaunched, speed, angle]);
+  }, [isLaunched, speed, angle, launchY]);
 
-  // Reset when isLaunched becomes false
   useEffect(() => {
     if (!isLaunched && bodyRef.current) {
-      bodyRef.current.setTranslation({ x: 0, y: 6, z: 0 }, true);
+      bodyRef.current.setTranslation({ x: 0, y: launchY, z: 0 }, true);
       bodyRef.current.setLinvel({ x: 0, y: 0, z: 0 }, true);
       bodyRef.current.setAngvel({ x: 0, y: 0, z: 0 }, true);
       hasLaunched.current = false;
     }
-  }, [isLaunched]);
+  }, [isLaunched, launchY]);
 
-  // Live stats (this is now safely inside the Canvas)
   useFrame(() => {
     if (!bodyRef.current || !isLaunched) return;
 
     const pos = bodyRef.current.translation();
     const dist = Math.sqrt(pos.x * pos.x);
-    const height = Math.max(0, pos.y - 0.6);
+    const height = Math.max(0, pos.y - ballRadius);
 
     if (height > maxHeightRef.current) {
       maxHeightRef.current = height;
@@ -81,60 +83,71 @@ function SceneContent({
       <directionalLight position={[20, 30, 15]} intensity={1.4} castShadow />
 
       <Physics gravity={[0, -9.81, 0]}>
+        {/* Ground */}
         <RigidBody type="fixed" position={[0, -1, 0]}>
           <mesh receiveShadow>
-            <boxGeometry args={[120, 2, 120]} />
+            <boxGeometry args={[140, 2, 140]} />
             <meshStandardMaterial color="#1e2937" />
           </mesh>
         </RigidBody>
 
-        {/* Origin */}
-        <mesh position={[0, 0.15, 0]}>
-          <cylinderGeometry args={[1.4, 1.4, 0.3, 32]} />
+        {/* Origin platform */}
+        <mesh position={[0, 0.12, 0]}>
+          <cylinderGeometry args={[1.6, 1.6, 0.24, 32]} />
           <meshStandardMaterial color="#3b82f6" />
         </mesh>
-        <mesh position={[0, 0.32, 0]}>
-          <boxGeometry args={[0.18, 0.08, 2.8]} />
+
+        {/* Origin cross */}
+        <mesh position={[0, 0.26, 0]}>
+          <boxGeometry args={[0.18, 0.08, 3]} />
           <meshStandardMaterial color="#93c5fd" />
         </mesh>
-        <mesh position={[0, 0.32, 0]}>
-          <boxGeometry args={[2.8, 0.08, 0.18]} />
+        <mesh position={[0, 0.26, 0]}>
+          <boxGeometry args={[3, 0.08, 0.18]} />
           <meshStandardMaterial color="#93c5fd" />
         </mesh>
 
-        {/* Ball */}
+        {/* Projectile + stronger trail */}
         <RigidBody
           ref={bodyRef}
-          position={[0, 6, 0]}
+          position={[0, launchY, 0]}
           colliders="ball"
           restitution={0.25}
           friction={0.4}
         >
-          <mesh castShadow>
-            <sphereGeometry args={[0.55]} />
-            <meshStandardMaterial
-              color="#ef4444"
-              emissive="#f87171"
-              emissiveIntensity={0.45}
-            />
-          </mesh>
+          <Trail
+            width={1.1}
+            length={22}
+            color="#fb7185"
+            attenuation={(t) => t * 0.85}
+            stride={0.1}
+          >
+            <mesh castShadow>
+              <sphereGeometry args={[ballRadius]} />
+              <meshStandardMaterial
+                color="#ef4444"
+                emissive="#f87171"
+                emissiveIntensity={0.5}
+              />
+            </mesh>
+          </Trail>
         </RigidBody>
       </Physics>
 
       <Grid
-        args={[100, 100]}
+        args={[120, 120]}
         cellSize={2}
         cellThickness={0.5}
         cellColor="#334155"
         sectionSize={10}
         sectionThickness={1.1}
         sectionColor="#475569"
-        fadeDistance={90}
+        fadeDistance={100}
         position={[0, 0.02, 0]}
       />
 
       <OrbitControls
-        target={[15, 5, 0]}
+        target={[18, 5, 0]}
         enablePan
         enableZoom
         enableRotate
@@ -148,7 +161,9 @@ function SceneContent({
 export function CanvasScene() {
   const [speed, setSpeed] = useState(16);
   const [angle, setAngle] = useState(45);
+  const [ballRadius, setBallRadius] = useState(0.55);
   const [isLaunched, setIsLaunched] = useState(false);
+
   const [stats, setStats] = useState({
     distance: 0,
     height: 0,
@@ -166,48 +181,90 @@ export function CanvasScene() {
   };
 
   return (
-    <div style={{ width: '100%', height: '100%', position: 'relative', background: '#0a0a0a' }}>
-      <Canvas camera={{ position: [28, 14, 28], fov: 40 }}>
-        <SceneContent
-          isLaunched={isLaunched}
-          speed={speed}
-          angle={angle}
-          onStatsUpdate={setStats}
-        />
-      </Canvas>
+    <div className="absolute inset-0 w-full h-full">
+        <Canvas
+            camera={{ position: [30, 14, 30], fov: 42 }}
+            style={{ width: '100%', height: '100%' }}
+        >
+            <SceneContent
+                isLaunched={isLaunched}
+                speed={speed}
+                angle={angle}
+                ballRadius={ballRadius}
+                onStatsUpdate={setStats}
+            />
+        </Canvas>
 
-      {/* Controls */}
-      <div className="absolute top-6 left-6 bg-black/90 p-5 rounded-xl border border-zinc-700 w-80 space-y-4 z-50">
-        <h3 className="font-semibold text-lg">Projectile Motion</h3>
+      {/* Control Panel */}
+      <div style={{
+            position: 'absolute',
+            top: '20px',
+            left: '20px',
+            backgroundColor: 'rgba(0, 0, 0, 0.9)',
+            padding: '20px',
+            borderRadius: '12px',
+            border: '1px solid #3f3f46',
+            width: '320px',
+            zIndex: 50,
+            color: 'white',
+            fontFamily: 'system-ui, sans-serif'
+          }}>
+          <h3 style={{ fontWeight: 600, fontSize: '1.125rem', marginBottom: '16px' }}>
+              Projectile Lab
+          </h3>
 
-        <div>
-          <label className="text-sm text-zinc-400">
-            Speed: <span className="text-white font-mono">{speed} m/s</span>
-          </label>
-          <input
-            type="range"
-            min="8"
-            max="30"
-            value={speed}
-            onChange={(e) => setSpeed(Number(e.target.value))}
-            className="w-full accent-cyan-500"
-            disabled={isLaunched}
-          />
+        <div className="space-y-3">
+          <p className="text-xs uppercase tracking-wider text-zinc-500">Launch</p>
+
+          <div>
+            <label className="text-sm text-zinc-400">
+              Speed: <span className="text-white font-mono">{speed} m/s</span>
+            </label>
+            <input
+              type="range"
+              min="8"
+              max="30"
+              value={speed}
+              onChange={(e) => setSpeed(Number(e.target.value))}
+              className="w-full accent-cyan-500"
+              disabled={isLaunched}
+            />
+          </div>
+
+          <div>
+            <label className="text-sm text-zinc-400">
+              Angle: <span className="text-white font-mono">{angle}°</span>
+            </label>
+            <input
+              type="range"
+              min="15"
+              max="75"
+              value={angle}
+              onChange={(e) => setAngle(Number(e.target.value))}
+              className="w-full accent-cyan-500"
+              disabled={isLaunched}
+            />
+          </div>
         </div>
 
-        <div>
-          <label className="text-sm text-zinc-400">
-            Angle: <span className="text-white font-mono">{angle}°</span>
-          </label>
-          <input
-            type="range"
-            min="15"
-            max="75"
-            value={angle}
-            onChange={(e) => setAngle(Number(e.target.value))}
-            className="w-full accent-cyan-500"
-            disabled={isLaunched}
-          />
+        <div className="space-y-3 pt-2 border-t border-zinc-700">
+          <p className="text-xs uppercase tracking-wider text-zinc-500">Ball</p>
+
+          <div>
+            <label className="text-sm text-zinc-400">
+              Radius: <span className="text-white font-mono">{ballRadius.toFixed(2)} m</span>
+            </label>
+            <input
+              type="range"
+              min="0.25"
+              max="1.2"
+              step="0.05"
+              value={ballRadius}
+              onChange={(e) => setBallRadius(Number(e.target.value))}
+              className="w-full accent-cyan-500"
+              disabled={isLaunched}
+            />
+          </div>
         </div>
 
         <div className="flex gap-3 pt-1">
