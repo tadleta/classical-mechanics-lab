@@ -268,7 +268,7 @@ if (!hasLanded.current) {
         <RigidBody type="fixed" position={[0, -1, 0]}>
           <mesh receiveShadow>
             <boxGeometry args={[700, 2, 700]} />
-            <meshStandardMaterial color="#1e2937" />
+            <meshStandardMaterial color={mode === 'baseball' ? '#166534' : '#1e2937'} />
           </mesh>
         </RigidBody>
 
@@ -302,15 +302,46 @@ if (!hasLanded.current) {
             </mesh>
 
             {/* Bases */}
-            <Base position={[0, 0.09, 0]} />
-            <Base position={[BASE_DISTANCE, 0.09, 0]} />
+            
+            {/* Home Plate */}
+            <mesh position={[0, 0.06, 0]} rotation={[Math.PI / 2, 0, -Math.PI / 4]}>
+              <shapeGeometry args={[(() => {
+              const shape = new THREE.Shape();
+              // Classic home plate dimensions (roughly to scale)
+              shape.moveTo(0, 0.85);
+              shape.lineTo(0.75, 0.85);
+              shape.lineTo(0.75, 0);
+              shape.lineTo(0, -0.75);
+              shape.lineTo(-0.75, 0);
+              shape.lineTo(-0.75, 0.85);
+              shape.lineTo(0, 0.85);
+              return shape;
+              })()]}
+            />
+  <meshStandardMaterial color="#f8fafc" side={THREE.DoubleSide} />
+</mesh>
+            <Base position={[BASE_DISTANCE, 0.09, 0.7]} />
             <Base position={[BASE_DISTANCE, 0.09, BASE_DISTANCE]} />
-            <Base position={[0, 0.09, BASE_DISTANCE]} />
+            <Base position={[0.7, 0.09, BASE_DISTANCE]} />
 
             {/* Mound */}
             <mesh position={[BASE_DISTANCE / 2, 0.18, BASE_DISTANCE / 2]}>
               <cylinderGeometry args={[2.1, 2.4, 0.35, 32]} />
               <meshStandardMaterial color="#a16207" />
+            </mesh>
+
+            {/* White foul lines (baselines) */}
+
+            {/* Left field line (along +X) */}
+            <mesh position={[FOUL_LINE / 2, 0.04, 0]} rotation={[0, 0, 0]}>
+              <boxGeometry args={[FOUL_LINE, 0.06, 0.35]} />
+              <meshStandardMaterial color="#f8fafc" />
+            </mesh>
+
+            {/* Right field line (along +Z) */}
+            <mesh position={[0, 0.04, FOUL_LINE / 2]} rotation={[0, Math.PI / 2, 0]}>
+              <boxGeometry args={[FOUL_LINE, 0.06, 0.35]} />
+              <meshStandardMaterial color="#f8fafc" />
             </mesh>
 
             {/* Smooth arc fence */}
@@ -378,7 +409,7 @@ if (!hasLanded.current) {
       />
 
       <OrbitControls
-        target={mode === 'baseball' ? [50, 6, 40] : [20, 5, 0]}
+        target={mode === 'baseball' ? [34, 4, 35] : [20, 5, 0]}
         enablePan
         enableZoom
         enableRotate
@@ -449,7 +480,7 @@ export function CanvasScene() {
 
   return (
     <div className="absolute inset-0 w-full h-full">
-      <Canvas camera={{ position: [70, 35, 70], fov: 42 }} style={{ width: '100%', height: '100%' }}>
+      <Canvas camera={{ position: [-25, 12, -25], fov: 45 }} style={{ width: '100%', height: '100%' }}>
         <SceneContent
           mode={mode}
           isLaunched={isLaunched}
