@@ -21,8 +21,8 @@ export const CENTER_FIELD_M = 121.92; // 400 ft
 export const WALL_HEIGHT_M = 4; // the fence mesh is 4 m tall, about 13 ft
 
 const METERS_PER_FOOT = 0.3048;
-const SPRINT_MPS = 27 * METERS_PER_FOOT;
-const REACTION_S = 0.45;
+export const SPRINT_MPS = 27 * METERS_PER_FOOT;
+export const REACTION_S = 0.45;
 const GLOVE_M = 2;
 const PAST_FIELDER_M = 0; // carry beyond the assigned outfielder's depth
 const GAP_DEGREES = 10;
@@ -52,9 +52,11 @@ export type Score = {
   kind: PlayKind;
   fenceM: number;
   carryM: number;
+  /** Defender the scorer sends to the ball, when there is one. */
+  fielder: string | null;
 };
 
-type Fielder = {
+export type Fielder = {
   name: string;
   x: number;
   z: number;
@@ -92,7 +94,8 @@ const OUTFIELD: Fielder[] = [
   place('RF', 290, 70, 'outfield'),
 ];
 
-const ALL_FIELDERS: Fielder[] = [...INFIELD, ...OUTFIELD];
+export const FIELDERS: readonly Fielder[] = [...INFIELD, ...OUTFIELD];
+const ALL_FIELDERS = FIELDERS;
 
 export function metersToFeet(meters: number): number {
   return meters / METERS_PER_FOOT;
@@ -267,11 +270,12 @@ export function scorePlay(input: ScoreInput): Score {
   const where = fieldSlice(fair ? theta : Math.PI / 4);
   const base = { hitType, barrel, hardHit, fenceM, carryM };
 
-  const call = (result: string, reason: string, kind: PlayKind): Score => ({
+  const call = (result: string, reason: string, kind: PlayKind, fielder: string | null): Score => ({
     ...base,
     result,
     reason,
     kind,
+    fielder,
   });
 
   if (input.clearedFence) {
@@ -283,11 +287,12 @@ export function scorePlay(input: ScoreInput): Score {
       'Home run',
       `Cleared the ${ft(fenceM)} fence ${where}, ${over} the ${ft(WALL_HEIGHT_M)} wall. Carry ${ft(carryM)}.`,
       'hr',
+      null,
     );
   }
 
   if (!fair) {
-    return call('Foul', 'Landed outside the foul lines.', 'foul');
+    return call('Foul', 'Landed outside the foul lines.', 'foul', null);
   }
 
   const shortBy = fenceM - carryM;
@@ -306,6 +311,7 @@ export function scorePlay(input: ScoreInput): Score {
         'Ground out',
         `Ground ball. ${fielder.name} gets to the path in ${secs(fielder.fielderS)}; the ball takes ${secs(fielder.ballS)} to get there.`,
         'out',
+        fielder.name,
       );
     }
     if (input.hitWall) {
@@ -314,12 +320,14 @@ export function scorePlay(input: ScoreInput): Score {
         result,
         `Ground ball through the infield and off the ${ft(fenceM)} fence ${where}. It did not clear the wall.`,
         'hit',
+        assignedOutfielder(theta).name,
       );
     }
     return call(
       'Single',
       `Ground ball through the infield ${where}. No infielder gets to the path before the ball.`,
       'hit',
+      assignedOutfielder(theta).name,
     );
   }
 
@@ -329,6 +337,7 @@ export function scorePlay(input: ScoreInput): Score {
       result,
       `Reached the ${ft(fenceM)} fence ${where} and stayed under the ${ft(WALL_HEIGHT_M)} wall.`,
       'hit',
+      assignedOutfielder(theta).name,
     );
   }
 
@@ -338,6 +347,7 @@ export function scorePlay(input: ScoreInput): Score {
       outName(hitType),
       `${fenceNote} ${catcher.name} is there in ${secs(catcher.arriveS)} (hang time ${secs(input.hangTimeS)}).`,
       'out',
+      catcher.name,
     );
   }
 
@@ -349,6 +359,7 @@ export function scorePlay(input: ScoreInput): Score {
       'Double',
       `${fenceNote} It gets past ${outfielder.name}, who starts at ${ft(outfielderDepth)}, and nobody catches it.`,
       'hit',
+      outfielder.name,
     );
   }
   if (gapDeg >= GAP_DEGREES && carryM >= GAP_MIN_M) {
@@ -356,6 +367,7 @@ export function scorePlay(input: ScoreInput): Score {
       'Double',
       `${fenceNote} It falls in the gap, ${Math.round(gapDeg)}° off the nearest outfielder, and nobody catches it in ${secs(input.hangTimeS)}.`,
       'hit',
+      outfielder.name,
     );
   }
 
@@ -363,5 +375,6 @@ export function scorePlay(input: ScoreInput): Score {
     'Single',
     `${fenceNote} It drops in front of ${outfielder.name} and nobody reaches it in ${secs(input.hangTimeS)}.`,
     'hit',
+    outfielder.name,
   );
 }

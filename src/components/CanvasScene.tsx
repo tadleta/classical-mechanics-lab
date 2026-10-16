@@ -21,7 +21,10 @@ import { MLB_PARK_COUNT, homeRunsByPark } from '../baseball/ballparks';
 import type { ParkResult, TrajectoryPoint } from '../baseball/ballparks';
 import { readHistory, rememberLaunch, writeHistory } from '../baseball/history';
 import type { SavedLaunch } from '../baseball/history';
+import { BAG, BASE_DISTANCE } from '../baseball/diamond';
+import { BALL_DRAG, boardCopy, livePlay } from '../baseball/playScript';
 import { BallparkShell } from './BallparkShell';
+import { Ballplayers } from './Ballplayers';
 
 type Mode = 'projectile' | 'baseball';
 
@@ -39,8 +42,6 @@ type FlightSnapshot = {
   ballRadius: number;
   mode: Mode;
 };
-
-const BASE_DISTANCE = 27.432; // 90 ft
 
 type FlightFacts = {
   clearedFence: boolean;
@@ -61,6 +62,7 @@ function SceneContent({
   onLanded,
   landingPos,
   markKind,
+  board,
 }: {
   mode: Mode;
   isLaunched: boolean;
@@ -78,6 +80,7 @@ function SceneContent({
   ) => void;
   landingPos: { x: number; z: number } | null;
   markKind: PlayKind | null;
+  board: ReturnType<typeof boardCopy>;
 }) {
   const bodyRef = useRef<RapierRigidBody>(null);
   const hasLaunched = useRef(false);
@@ -91,6 +94,7 @@ function SceneContent({
   const trajectory = useRef<TrajectoryPoint[]>([]);
   const lastDist = useRef(0);
   const flightNonce = useRef(0);
+  const ballMesh = useRef<THREE.Mesh>(null);
 
   const launchY = ballRadius + 0.12;
 
@@ -171,6 +175,9 @@ function SceneContent({
 
   // Physics + drag + landing
   useFrame((_, delta) => {
+    if (ballMesh.current) {
+      ballMesh.current.visible = mode !== 'baseball' || !livePlay.fielded;
+    }
     if (!bodyRef.current || !isLaunched || !hasLaunched.current) return;
 
     const pos = bodyRef.current.translation();
@@ -178,6 +185,13 @@ function SceneContent({
     const dist = Math.sqrt(pos.x * pos.x + pos.z * pos.z);
     const height = Math.max(0, pos.y - ballRadius);
     const time = (performance.now() - startTime.current) / 1000;
+    if (mode === 'baseball' && livePlay.nonce === flightNonce.current) {
+      livePlay.ballX = pos.x;
+      livePlay.ballY = pos.y;
+      livePlay.ballZ = pos.z;
+      livePlay.time = time;
+      livePlay.landed = hasLanded.current;
+    }
 
     if (height > maxHeightRef.current) {
       maxHeightRef.current = height;
@@ -220,7 +234,7 @@ if (!hasLanded.current && mode === 'baseball') {
 
   if (speedNow > 1) {
     // Tunable coefficient – start here
-    const dragCoeff = 0.0034;
+    const dragCoeff = BALL_DRAG;
 
     // Magnitude of drag acceleration
     const dragAccel = dragCoeff * speedNow * speedNow;
@@ -429,9 +443,9 @@ if (!hasLanded.current) {
             />
   <meshStandardMaterial color="#f8fafc" side={THREE.DoubleSide} />
 </mesh>
-            <Base position={[BASE_DISTANCE, 0.09, 0.7]} />
-            <Base position={[BASE_DISTANCE, 0.09, BASE_DISTANCE]} />
-            <Base position={[0.7, 0.09, BASE_DISTANCE]} />
+            <Base position={[BAG.third[0], 0.09, BAG.third[1]]} />
+            <Base position={[BAG.second[0], 0.09, BAG.second[1]]} />
+            <Base position={[BAG.first[0], 0.09, BAG.first[1]]} />
 
             {/* Mound */}
             <mesh position={[BASE_DISTANCE / 2, 0.18, BASE_DISTANCE / 2]}>
@@ -491,7 +505,7 @@ if (!hasLanded.current) {
           friction={0.9}
         >
           <Trail key={launchNonce} width={0.9} length={18} color="#fb7185" attenuation={(t) => t * 0.9}>
-            <mesh castShadow>
+            <mesh ref={ballMesh} castShadow>
               <sphereGeometry args={[ballRadius]} />
               <meshStandardMaterial
                 color={mode === 'baseball' ? '#f8fafc' : '#ef4444'}
@@ -503,7 +517,8 @@ if (!hasLanded.current) {
         </RigidBody>
       </Physics>
 
-      {mode === 'baseball' && <BallparkShell />}
+      {mode === 'baseball' && <BallparkShell board={board} />}
+      {mode === 'baseball' && <Ballplayers />}
 
       {landingPos && mode === 'projectile' && <LandingMarker x={landingPos.x} z={landingPos.z} />}
       {landingPos && mode === 'baseball' && (
@@ -793,6 +808,21 @@ export function CanvasScene() {
     setLaunchNonce(next);
     setIsLaunched(true);
     clearFlightReadout();
+    livePlay.nonce = next;
+    livePlay.active = snapshot.mode === 'baseball';
+    livePlay.landed = false;
+    livePlay.time = 0;
+    livePlay.ballX = 0;
+    livePlay.ballY = snapshot.ballRadius;
+    livePlay.ballZ = 0;
+    livePlay.landingX = null;
+    livePlay.landingZ = null;
+    livePlay.launchAngle = snapshot.angle;
+    livePlay.speedMs = snapshot.speedMs;
+    livePlay.spray = snapshot.sprayAngle;
+    livePlay.ballRadius = snapshot.ballRadius;
+    livePlay.play = null;
+    livePlay.fielded = false;
   };
 
   const reset = () => {
@@ -803,6 +833,14 @@ export function CanvasScene() {
     setLaunchNonce(next);
     setIsLaunched(false);
     clearFlightReadout();
+    livePlay.nonce = next;
+    livePlay.active = false;
+    livePlay.landed = false;
+    livePlay.play = null;
+    livePlay.landingX = null;
+    livePlay.landingZ = null;
+    livePlay.time = 0;
+    livePlay.fielded = false;
   };
 
   const handleLanded = (
@@ -829,6 +867,14 @@ export function CanvasScene() {
           })
         : null;
     const parks = inputs.mode === 'baseball' ? homeRunsByPark(pos.x, pos.z, flight.trajectory) : null;
+
+    if (inputs.mode === 'baseball' && nonce === livePlay.nonce) {
+      livePlay.landed = true;
+      livePlay.landingX = pos.x;
+      livePlay.landingZ = pos.z;
+      livePlay.play = scored;
+      livePlay.time = finalStats.time;
+    }
 
     setHasLanded(true);
     setFinalResult(finalStats);
@@ -879,6 +925,14 @@ export function CanvasScene() {
           : play.kind === 'foul'
             ? '#fb923c'
             : '#e2e8f0';
+  const board = boardCopy({
+    active: mode === 'baseball' && (isLaunched || hasLanded),
+    play: hasLanded ? play : null,
+    distanceM: hasLanded && finalResult ? finalResult.distance : stats.distance,
+    speedMs: flightSpeed,
+    angle: flightAngle,
+    hangTimeS: hasLanded && finalResult ? finalResult.time : stats.time,
+  });
 
   return (
     <div className="absolute inset-0 w-full h-full">
@@ -895,6 +949,7 @@ export function CanvasScene() {
           onLanded={handleLanded}
           landingPos={landingPos}
           markKind={play?.kind ?? null}
+          board={board}
         />
       </Canvas>
 

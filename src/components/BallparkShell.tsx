@@ -1,6 +1,8 @@
 import { useLayoutEffect, useMemo, useRef } from 'react';
+import { Html } from '@react-three/drei';
 import * as THREE from 'three';
 import { fenceRadiusMeters, fieldPoint } from '../baseball/scoring';
+import type { BoardCopy } from '../baseball/playScript';
 import {
   GRASS_BAND_WIDTH,
   MAX_SEATS,
@@ -138,9 +140,15 @@ function LightTower({ position }: { position: [number, number, number] }) {
   );
 }
 
-function Scoreboard() {
+function Scoreboard({ board }: { board: BoardCopy }) {
   const ref = useRef<THREE.Group>(null);
   const [x, y, z] = scoreboardAnchor();
+  const diamond = [
+    { id: 0, x: 0, y: -1.7 },
+    { id: 1, x: 1.7, y: 0 },
+    { id: 2, x: 0, y: 1.7 },
+    { id: 3, x: -1.7, y: 0 },
+  ];
 
   useLayoutEffect(() => {
     // lookAt points the group's +z at home, so the screen sits on local +z.
@@ -150,16 +158,52 @@ function Scoreboard() {
   return (
     <group ref={ref} position={[x, y, z]}>
       <mesh>
-        <boxGeometry args={[26, 12, 1.4]} />
+        <boxGeometry args={[38, 18, 1.6]} />
         <meshStandardMaterial color="#0f172a" />
       </mesh>
-      <mesh position={[0, 0.6, 0.8]}>
-        <boxGeometry args={[22, 7.2, 0.2]} />
-        <meshStandardMaterial color="#052e16" emissive="#4ade80" emissiveIntensity={0.28} />
+      <mesh position={[0, 0.4, 0.95]}>
+        <boxGeometry args={[34, 14, 0.2]} />
+        <meshStandardMaterial color="#052e16" emissive="#166534" emissiveIntensity={0.35} />
       </mesh>
-      {[-7.2, 0, 7.2].map((xPos) => (
-        <mesh key={xPos} position={[xPos, -4.2, 0.85]}>
-          <boxGeometry args={[5.4, 1.3, 0.16]} />
+      <Html
+        transform
+        center
+        position={[-2.2, 0.8, 1.25]}
+        distanceFactor={16}
+        zIndexRange={[20, 0]}
+        pointerEvents="none"
+        style={{ pointerEvents: 'none' }}
+      >
+        <div
+          style={{
+            width: 680,
+            textAlign: 'center',
+            fontFamily: 'Impact, Haettenschweiler, sans-serif',
+            pointerEvents: 'none',
+            userSelect: 'none',
+          }}
+        >
+          <div style={{ fontSize: 108, lineHeight: 0.95, letterSpacing: 1, color: board.color }}>{board.headline}</div>
+          <div style={{ fontSize: 40, letterSpacing: 1, color: '#ecfccb', marginTop: 10 }}>{board.detail}</div>
+          <div style={{ fontSize: 32, letterSpacing: 1, color: '#bbf7d0', marginTop: 8, minHeight: 36 }}>{board.footer}</div>
+        </div>
+      </Html>
+      {diamond.map((spot) => {
+        const on = spot.id === 0 ? board.bases >= 4 : board.bases >= 4 || board.bases === spot.id;
+        return (
+          <mesh key={spot.id} position={[12.4 + spot.x, spot.y, 1.2]}>
+            <sphereGeometry args={[0.42, 14, 10]} />
+            <meshStandardMaterial
+              color={on ? '#f97316' : '#14532d'}
+              emissive={on ? '#f97316' : '#000000'}
+              emissiveIntensity={on ? 0.7 : 0}
+            />
+          </mesh>
+        );
+      })}
+      {[-8, 0, 8].map((xPos) => (
+        <mesh key={xPos} position={[xPos, -6.4, 1]}>
+          <boxGeometry args={[6.2, 1.15, 0.16]} />
           <meshStandardMaterial color="#78350f" emissive="#fbbf24" emissiveIntensity={0.55} />
         </mesh>
       ))}
@@ -195,7 +239,7 @@ function StadiumBowl() {
 }
 
 /** Decorative bowl, lights, and wall surroundings. None of these are colliders. */
-export function BallparkShell() {
+export function BallparkShell({ board }: { board: BoardCopy }) {
   const towers = lightTowerPositions();
 
   return (
@@ -226,7 +270,7 @@ export function BallparkShell() {
       {towers.map((position) => (
         <LightTower key={position.join(',')} position={position} />
       ))}
-      <Scoreboard />
+      <Scoreboard board={board} />
 
       <mesh position={[26, 0.9, -5.5]}>
         <boxGeometry args={[14, 1.8, 3.2]} />
