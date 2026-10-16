@@ -11,6 +11,8 @@ import {
   fenceMetersForSpray,
   fenceRadiusMeters,
   fieldPoint,
+  grounderAtFielder,
+  groundOutSpot,
   isBarrel,
   isHardHit,
   scorePlay,
@@ -22,7 +24,8 @@ import type { ParkResult, TrajectoryPoint } from '../baseball/ballparks';
 import { readHistory, rememberLaunch, writeHistory } from '../baseball/history';
 import type { SavedLaunch } from '../baseball/history';
 import { BAG, BASE_DISTANCE } from '../baseball/diamond';
-import { BALL_DRAG, boardCopy, livePlay } from '../baseball/playScript';
+import { BALL_DRAG, boardCopy, CONTACT, livePlay, PITCH_S, pitchPoint } from '../baseball/playScript';
+import type { BatterHand } from '../baseball/playScript';
 import { BallparkShell } from './BallparkShell';
 import { Ballplayers } from './Ballplayers';
 
@@ -41,6 +44,7 @@ type FlightSnapshot = {
   sprayAngle: number;
   ballRadius: number;
   mode: Mode;
+  hand: BatterHand;
 };
 
 type FlightFacts = {
@@ -63,6 +67,8 @@ function SceneContent({
   landingPos,
   markKind,
   board,
+  hand,
+  onPitched,
 }: {
   mode: Mode;
   isLaunched: boolean;
@@ -81,6 +87,8 @@ function SceneContent({
   landingPos: { x: number; z: number } | null;
   markKind: PlayKind | null;
   board: ReturnType<typeof boardCopy>;
+  hand: BatterHand;
+  onPitched: () => void;
 }) {
   const bodyRef = useRef<RapierRigidBody>(null);
   const hasLaunched = useRef(false);
@@ -95,6 +103,8 @@ function SceneContent({
   const lastDist = useRef(0);
   const flightNonce = useRef(0);
   const ballMesh = useRef<THREE.Mesh>(null);
+  const pitching = useRef(false);
+  const pitchTime = useRef(0);
 
   const launchY = ballRadius + 0.12;
 
@@ -135,6 +145,19 @@ function SceneContent({
     maxHeightRef.current = 0;
     startTime.current = performance.now();
 
+    if (mode === 'baseball') {
+      pitching.current = true;
+      pitchTime.current = 0;
+      livePlay.pitching = true;
+      const start = pitchPoint(0);
+      bodyRef.current.setTranslation(start, true);
+      bodyRef.current.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      bodyRef.current.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      return;
+    }
+
+    pitching.current = false;
+    livePlay.pitching = false;
     const timer = setTimeout(() => {
       if (!bodyRef.current) return;
       const vel = getVelocity();
@@ -154,7 +177,7 @@ function SceneContent({
     }, 50);
 
     return () => clearTimeout(timer);
-  }, [isLaunched, launchNonce, getVelocity, launchY]);
+  }, [isLaunched, launchNonce, getVelocity, launchY, mode]);
 
   // Reset
   useEffect(() => {
@@ -164,6 +187,8 @@ function SceneContent({
       bodyRef.current.setAngvel({ x: 0, y: 0, z: 0 }, true);
       hasLaunched.current = false;
       hasLanded.current = false;
+      pitching.current = false;
+      livePlay.pitching = false;
       prevPos.current = null;
       clearedFence.current = false;
       hitWall.current = false;
@@ -177,6 +202,42 @@ function SceneContent({
   useFrame((_, delta) => {
     if (ballMesh.current) {
       ballMesh.current.visible = mode !== 'baseball' || !livePlay.fielded;
+    }
+    if (pitching.current && bodyRef.current && isLaunched && mode === 'baseball') {
+      pitchTime.current += Math.min(delta, 0.05);
+      const u = Math.min(pitchTime.current / PITCH_S, 1);
+      const point = pitchPoint(u);
+      bodyRef.current.setTranslation(point, true);
+      bodyRef.current.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      bodyRef.current.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      if (livePlay.nonce === flightNonce.current) {
+        livePlay.ballX = point.x;
+        livePlay.ballY = point.y;
+        livePlay.ballZ = point.z;
+        livePlay.time = 0;
+        livePlay.landed = false;
+        livePlay.pitching = true;
+      }
+      if (u >= 1) {
+        const vel = getVelocity();
+        bodyRef.current.setTranslation({ x: CONTACT.x, y: CONTACT.y, z: CONTACT.z }, true);
+        bodyRef.current.setLinvel(vel, true);
+        bodyRef.current.setAngvel({ x: 0, y: 0, z: 0 }, true);
+        pitching.current = false;
+        livePlay.pitching = false;
+        hasLaunched.current = true;
+        hasLanded.current = false;
+        startTime.current = performance.now();
+        maxHeightRef.current = 0;
+        prevPos.current = null;
+        clearedFence.current = false;
+        hitWall.current = false;
+        clearanceHeight.current = null;
+        trajectory.current = [];
+        lastDist.current = 0;
+        onPitched();
+      }
+      return;
     }
     if (!bodyRef.current || !isLaunched || !hasLaunched.current) return;
 
@@ -254,6 +315,35 @@ if (!hasLanded.current && mode === 'baseball') {
     );
   }
 }
+    // A ground out is played where the infielder cuts the ball off. Stop a low
+    // hopper there so it does not roll through to short center.
+    const stopGroundOut = (spotX: number, spotZ: number, along: number) => {
+      const body = bodyRef.current;
+      if (!body) return;
+      trajectory.current = trajectory.current.filter((point) => point.distM <= along + 0.3);
+      body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      body.setTranslation({ x: spotX, y: ballRadius, z: spotZ }, true);
+      hasLanded.current = true;
+      if (livePlay.nonce === flightNonce.current) {
+        livePlay.ballX = spotX;
+        livePlay.ballY = ballRadius;
+        livePlay.ballZ = spotZ;
+      }
+      onLanded(
+        { ...currentStats, distance: along, height: 0 },
+        { x: spotX, z: spotZ },
+        flightFacts(),
+        flightNonce.current,
+      );
+    };
+
+    if (!hasLanded.current && mode === 'baseball' && angle < 10) {
+      const v0 = getVelocity();
+      const caught = grounderAtFielder(speed, angle, pos.x, pos.y, pos.z, v0.x, v0.z);
+      if (caught) stopGroundOut(caught.x, caught.z, caught.along);
+    }
+
 // ===== Reliable Landing Detection =====
 if (!hasLanded.current) {
   onStatsUpdate(currentStats);
@@ -267,34 +357,52 @@ if (!hasLanded.current) {
   // Has it been in the air long enough?
   const hasBeenInAir = time > 0.9;
 
+  // A bounce behind the fielder still counts as fielded at his depth.
+  const behindFielder = () => {
+    if (mode !== 'baseball') return null;
+    const spot = groundOutSpot(speed, angle, pos.x, pos.z);
+    if (!spot || dist <= spot.along + 0.75) return null;
+    return spot;
+  };
+
   if (hasLeftGround && isNearGround && hasBeenInAir) {
-    // This is the true first landing point
-    const landX = pos.x;
-    const landZ = pos.z;
+    const played = behindFielder();
+    if (played) {
+      stopGroundOut(played.x, played.z, played.along);
+    } else {
+      // This is the true first landing point
+      const landX = pos.x;
+      const landZ = pos.z;
 
-    // Soften the landing but allow a little roll
-    bodyRef.current.setLinvel(
-      { x: vel.x * 0.5, y: 0, z: vel.z * 0.5 },
-      true
-    );
-    bodyRef.current.setAngvel({ x: 0, y: 0, z: 0 }, true);
-    bodyRef.current.setTranslation({ x: landX, y: ballRadius, z: landZ }, true);
+      // Soften the landing but allow a little roll
+      bodyRef.current.setLinvel(
+        { x: vel.x * 0.5, y: 0, z: vel.z * 0.5 },
+        true
+      );
+      bodyRef.current.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      bodyRef.current.setTranslation({ x: landX, y: ballRadius, z: landZ }, true);
 
-    hasLanded.current = true;
-    onLanded(currentStats, { x: landX, z: landZ }, flightFacts(), flightNonce.current);
+      hasLanded.current = true;
+      onLanded(currentStats, { x: landX, z: landZ }, flightFacts(), flightNonce.current);
+    }
   }
 
   // Safety net only
   if (time > 8.0 && !hasLanded.current) {
-    const landX = pos.x;
-    const landZ = pos.z;
+    const played = behindFielder();
+    if (played) {
+      stopGroundOut(played.x, played.z, played.along);
+    } else {
+      const landX = pos.x;
+      const landZ = pos.z;
 
-    bodyRef.current.setLinvel({ x: 0, y: 0, z: 0 }, true);
-    bodyRef.current.setAngvel({ x: 0, y: 0, z: 0 }, true);
-    bodyRef.current.setTranslation({ x: landX, y: ballRadius, z: landZ }, true);
+      bodyRef.current.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      bodyRef.current.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      bodyRef.current.setTranslation({ x: landX, y: ballRadius, z: landZ }, true);
 
-    hasLanded.current = true;
-    onLanded(currentStats, { x: landX, z: landZ }, flightFacts(), flightNonce.current);
+      hasLanded.current = true;
+      onLanded(currentStats, { x: landX, z: landZ }, flightFacts(), flightNonce.current);
+    }
   }
 }
   });
@@ -517,7 +625,7 @@ if (!hasLanded.current) {
         </RigidBody>
       </Physics>
 
-      {mode === 'baseball' && <BallparkShell board={board} />}
+      {mode === 'baseball' && <BallparkShell board={board} hand={hand} />}
       {mode === 'baseball' && <Ballplayers />}
 
       {landingPos && mode === 'projectile' && <LandingMarker x={landingPos.x} z={landingPos.z} />}
@@ -763,6 +871,8 @@ export function CanvasScene() {
   const [angle, setAngle] = useState(25);
   const [sprayAngle, setSprayAngle] = useState(0);
   const [ballRadius, setBallRadius] = useState(0.037);
+  const [batterHand, setBatterHand] = useState<BatterHand>('R');
+  const [isPitching, setIsPitching] = useState(false);
 
   const [stats, setStats] = useState({
     distance: 0,
@@ -785,6 +895,10 @@ export function CanvasScene() {
     writeHistory(history);
   }, [history]);
 
+  useEffect(() => {
+    if (!isLaunched) livePlay.hand = batterHand;
+  }, [batterHand, isLaunched]);
+
   const mphToMs = (mph: number) => mph * 0.44704;
   const msToMph = (ms: number) => ms / 0.44704;
   const metersToFeet = (m: number) => m * 3.28084;
@@ -802,11 +916,12 @@ export function CanvasScene() {
   const launch = () => {
     const next = activeNonce.current + 1;
     activeNonce.current = next;
-    const snapshot: FlightSnapshot = { speedMs, angle, sprayAngle, ballRadius, mode };
+    const snapshot: FlightSnapshot = { speedMs, angle, sprayAngle, ballRadius, mode, hand: batterHand };
     flightInputsRef.current = snapshot;
     setFlightInputs(snapshot);
     setLaunchNonce(next);
     setIsLaunched(true);
+    setIsPitching(snapshot.mode === 'baseball');
     clearFlightReadout();
     livePlay.nonce = next;
     livePlay.active = snapshot.mode === 'baseball';
@@ -823,6 +938,8 @@ export function CanvasScene() {
     livePlay.ballRadius = snapshot.ballRadius;
     livePlay.play = null;
     livePlay.fielded = false;
+    livePlay.hand = snapshot.hand;
+    livePlay.pitching = snapshot.mode === 'baseball';
   };
 
   const reset = () => {
@@ -832,6 +949,7 @@ export function CanvasScene() {
     setFlightInputs(null);
     setLaunchNonce(next);
     setIsLaunched(false);
+    setIsPitching(false);
     clearFlightReadout();
     livePlay.nonce = next;
     livePlay.active = false;
@@ -841,6 +959,8 @@ export function CanvasScene() {
     livePlay.landingZ = null;
     livePlay.time = 0;
     livePlay.fielded = false;
+    livePlay.hand = batterHand;
+    livePlay.pitching = false;
   };
 
   const handleLanded = (
@@ -932,11 +1052,15 @@ export function CanvasScene() {
     speedMs: flightSpeed,
     angle: flightAngle,
     hangTimeS: hasLanded && finalResult ? finalResult.time : stats.time,
+    pitching: isPitching,
   });
 
+  const shownHand = isLaunched && flightInputs ? flightInputs.hand : batterHand;
+
   return (
-    <div className="absolute inset-0 w-full h-full">
-      <Canvas camera={{ position: [-25, 12, -25], fov: 45 }} style={{ width: '100%', height: '100%' }}>
+    <div className="absolute inset-0 flex h-full w-full">
+      <div className="relative min-h-0 min-w-0 flex-1">
+      <Canvas camera={{ position: [-25, 12, -25], fov: 45 }} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}>
         <SceneContent
           mode={mode}
           isLaunched={isLaunched}
@@ -950,23 +1074,21 @@ export function CanvasScene() {
           landingPos={landingPos}
           markKind={play?.kind ?? null}
           board={board}
+          hand={shownHand}
+          onPitched={() => setIsPitching(false)}
         />
       </Canvas>
+      </div>
 
-      {/* Control Panel */}
       <div
         style={{
-          position: 'absolute',
-          top: 20,
-          left: 20,
-          backgroundColor: 'rgba(0,0,0,0.93)',
-          padding: 20,
-          borderRadius: 12,
-          border: '1px solid #3f3f46',
           width: 360,
-          maxHeight: 'calc(100% - 40px)',
+          flexShrink: 0,
+          height: '100%',
           overflowY: 'auto',
-          zIndex: 50,
+          backgroundColor: '#09090b',
+          padding: 20,
+          borderLeft: '1px solid #3f3f46',
           color: 'white',
           fontFamily: 'system-ui, sans-serif',
         }}
@@ -1015,6 +1137,34 @@ export function CanvasScene() {
           {mode === 'baseball' ? (
             <>
               <div style={{ marginBottom: 12 }}>
+                <label style={{ fontSize: 13, color: '#a1a1aa', display: 'block', marginBottom: 6 }}>Batter</label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  {(['R', 'L'] as const).map((side) => {
+                    const selected = batterHand === side;
+                    return (
+                      <button
+                        key={side}
+                        type="button"
+                        onClick={() => setBatterHand(side)}
+                        style={{
+                          flex: 1,
+                          padding: '8px 0',
+                          borderRadius: 8,
+                          border: selected ? '1px solid #C6011F' : '1px solid #3f3f46',
+                          background: selected ? '#C6011F' : '#27272a',
+                          color: 'white',
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {side === 'R' ? 'Righty' : 'Lefty'}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 12 }}>
                 <label style={{ fontSize: 13, color: '#a1a1aa' }}>
                   Exit Velocity: <span style={{ color: 'white', fontFamily: 'monospace' }}>{msToMph(speedMs).toFixed(0)} mph</span>
                 </label>
@@ -1055,9 +1205,9 @@ export function CanvasScene() {
                   style={{ width: '100%', accentColor: '#22d3ee' }}
                 />
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#71717a', marginTop: 2 }}>
-                  <span>Pull</span>
+                  <span>{batterHand === 'R' ? 'Pull' : 'Oppo'}</span>
                   <span>Center</span>
-                  <span>Oppo</span>
+                  <span>{batterHand === 'R' ? 'Oppo' : 'Pull'}</span>
                 </div>
               </div>
             </>
@@ -1144,6 +1294,9 @@ export function CanvasScene() {
           </button>
         </div>
         <p style={{ color: '#71717a', fontSize: 11, lineHeight: 1.45, margin: '-8px 0 16px' }}>
+          {mode === 'baseball'
+            ? 'Launch throws a pitch to the plate, then hits it with these specs. '
+            : ''}
           Change the sliders and launch again. The ball resets on its own, and the last ten finished flights stay in this tab.
         </p>
 
@@ -1191,7 +1344,7 @@ export function CanvasScene() {
               <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 12, paddingTop: 10, borderTop: '1px solid #3f3f46' }}>
                 <span style={{ color: '#a1a1aa' }}>Result</span>
                 <span style={{ fontFamily: 'monospace', color: resultColor }}>
-                  {!isLaunched ? 'Ready' : hasLanded && play ? play.result : 'In flight…'}
+                  {!isLaunched ? 'Ready' : isPitching ? 'Pitching…' : hasLanded && play ? play.result : 'In flight…'}
                 </span>
               </div>
               {hasLanded && play && (
@@ -1231,7 +1384,7 @@ export function CanvasScene() {
                 </div>
               )}
               <p style={{ color: '#71717a', fontSize: 11, lineHeight: 1.45, margin: '10px 0 0' }}>
-                A home run here has to clear this fence (about 340 ft down the lines, 400 ft in center, 13 ft wall). The 30 ballparks are the real 2026 MLB fences, scored from this same flight. Hit type is the Statcast launch-angle band. Balls that stay in are scored against an average MLB defense: typical depths, a 27 ft/s sprint, and a 0.45 s jump. The ring marks where it came down.
+                A home run here has to clear this fence (about 340 ft down the lines, 400 ft in center, 13 ft wall). The 30 ballparks are the real 2026 MLB fences, scored from this same flight. Hit type is the Statcast launch-angle band. Balls that stay in are scored against an average MLB defense: typical depths, a 27 ft/s sprint, and a 0.45 s jump. The ring marks where it came down. On a ground out, the ring is where the infielder fields it.
               </p>
             </>
           ) : (

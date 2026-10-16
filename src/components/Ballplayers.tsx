@@ -2,7 +2,9 @@ import { useFrame } from '@react-three/fiber';
 import { useMemo, useRef } from 'react';
 import type { Group, Mesh } from 'three';
 import {
+  BATTER_CAP,
   BATTER_COLOR,
+  FIELDER_CAP,
   FIELDER_COLOR,
   createPlaySim,
   livePlay,
@@ -92,7 +94,7 @@ export function Ballplayers() {
         >
           <Blob
             color={actor.role === 'hit' ? BATTER_COLOR : FIELDER_COLOR}
-            cap={actor.role === 'hit' ? '#7c2d12' : '#1d4ed8'}
+            cap={actor.role === 'hit' ? BATTER_CAP : FIELDER_CAP}
           />
         </group>
       ))}

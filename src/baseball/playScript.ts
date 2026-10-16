@@ -6,6 +6,7 @@ import {
   fenceCross,
   fenceRadiusMeters,
   fieldPoint,
+  groundOutSpot,
   scorePlay,
   type Score,
 } from './scoring';
@@ -14,11 +15,49 @@ import {
 export const BALL_DRAG = 0.0034;
 export const RUNNER_MPS = 6.5;
 export const THROW_MPS = 36;
-export const FIELDER_COLOR = '#e2e8f0';
-export const BATTER_COLOR = '#f97316';
+/** Cincinnati red. Fielders wear white with this cap; the batter wears this with a white cap. */
+export const REDS_RED = '#C6011F';
+export const FIELDER_COLOR = '#f8fafc';
+export const FIELDER_CAP = REDS_RED;
+export const BATTER_COLOR = REDS_RED;
+export const BATTER_CAP = '#f8fafc';
+
+export type BatterHand = 'R' | 'L';
 
 /** Right-handed batter, on the third-base side of the plate. */
 export const BATTER = { x: 1.05, z: -0.85 };
+
+/** Where the hitter stands. Righty is the third-base box; lefty is the first-base box. */
+export function batterBox(hand: BatterHand): { x: number; z: number } {
+  if (hand === 'L') return { x: -0.85, z: 1.05 };
+  return { x: BATTER.x, z: BATTER.z };
+}
+
+/** Belt-high meeting point over the plate. The batted ball leaves from here. */
+export const CONTACT = { x: 0, y: 0.92, z: 0 };
+/** How long the pitch takes to reach the plate. */
+export const PITCH_S = 0.48;
+
+/** Release point, just in front of the pitcher and toward home. */
+export function pitchRelease(): { x: number; y: number; z: number } {
+  const mx = BAG.mound[0];
+  const mz = BAG.mound[1];
+  const len = Math.hypot(mx, mz) || 1;
+  const front = 1.15;
+  return { x: mx - (mx / len) * front, y: 1.95, z: mz - (mz / len) * front };
+}
+
+/** Pitch position from release (u = 0) to the plate (u = 1). */
+export function pitchPoint(u: number): { x: number; y: number; z: number } {
+  const start = pitchRelease();
+  const t = Math.min(Math.max(u, 0), 1);
+  const sink = 0.28 * t * t * (1 - t);
+  return {
+    x: start.x + (CONTACT.x - start.x) * t,
+    y: start.y + (CONTACT.y - start.y) * t - sink,
+    z: start.z + (CONTACT.z - start.z) * t,
+  };
+}
 /** Behind the plate, toward the camera. Not part of the scoring model. */
 export const CATCHER = { x: -2.3, z: -2.3 };
 
@@ -39,6 +78,9 @@ export type LivePlay = {
   play: Score | null;
   /** True once a fielder has the ball, so the physics ball can hide behind the glove and the throw. */
   fielded: boolean;
+  hand: BatterHand;
+  /** True while the pitch is on its way to the plate, before the swing. */
+  pitching: boolean;
 };
 
 export function createLivePlay(): LivePlay {
@@ -58,6 +100,8 @@ export function createLivePlay(): LivePlay {
     ballRadius: 0.037,
     play: null,
     fielded: false,
+    hand: 'R',
+    pitching: false,
   };
 }
 
@@ -97,12 +141,16 @@ export function boardCopy(input: {
   speedMs: number;
   angle: number;
   hangTimeS: number;
+  pitching?: boolean;
 }): BoardCopy {
   const feet = Math.round(input.distanceM * 3.28084);
   const mph = Math.round(input.speedMs / 0.44704);
   const detail = `${feet} FT    EV ${mph} MPH    LA ${Math.round(input.angle)}°`;
   if (!input.active) {
     return { headline: 'PLAY BALL', detail: 'BATTER UP', footer: '', color: '#e2e8f0', bases: 0 };
+  }
+  if (input.pitching) {
+    return { headline: 'PITCH', detail, footer: 'TO THE PLATE', color: '#f8fafc', bases: 0 };
   }
   if (!input.play) {
     return { headline: 'IN PLAY', detail, footer: '', color: '#e2e8f0', bases: 0 };
@@ -181,7 +229,7 @@ export type PlaySim = {
   predZ: number;
 };
 
-function roster(): Actor[] {
+function roster(hand: BatterHand): Actor[] {
   const actors: Actor[] = FIELDERS.map((fielder) => ({
     name: fielder.name,
     x: fielder.x,
@@ -204,14 +252,15 @@ function roster(): Actor[] {
     moving: false,
     role: 'catcher',
   });
+  const box = batterBox(hand);
   actors.push({
     name: 'B',
-    x: BATTER.x,
-    z: BATTER.z,
-    homeX: BATTER.x,
-    homeZ: BATTER.z,
-    faceX: BAG.mound[0] - BATTER.x,
-    faceZ: BAG.mound[1] - BATTER.z,
+    x: box.x,
+    z: box.z,
+    homeX: box.x,
+    homeZ: box.z,
+    faceX: BAG.mound[0] - box.x,
+    faceZ: BAG.mound[1] - box.z,
     moving: false,
     role: 'hit',
   });
@@ -221,7 +270,7 @@ function roster(): Actor[] {
 export function createPlaySim(): PlaySim {
   return {
     nonce: -1,
-    actors: roster(),
+    actors: roster('R'),
     waypoint: 0,
     peeled: false,
     hold: 0,
@@ -270,6 +319,15 @@ function insideFence(x: number, z: number): [number, number] {
   if (radius <= fence) return [x, z];
   const [px, , pz] = fieldPoint(theta, fence);
   return [px, pz];
+}
+
+/** Ground outs are played where the infielder cuts the ball off, not at a bounce behind him. */
+function fieldingSpot(play: Score | null, x: number, z: number, clock: LivePlay): [number, number] {
+  const atLanding = insideFence(x, z);
+  if (!play || play.kind !== 'out' || play.hitType !== 'Ground ball') return atLanding;
+  const spot = groundOutSpot(clock.speedMs, clock.launchAngle, x, z);
+  if (!spot) return atLanding;
+  return [spot.x, spot.z];
 }
 
 function runnerBases(play: Score): 0 | 1 | 2 | 3 | 4 {
@@ -352,7 +410,7 @@ export function predictFlight(clock: LivePlay): { x: number; z: number; score: S
   if (!clock.active) return null;
   const vel = launchVelocity(clock.speedMs, clock.launchAngle, clock.spray);
   let x = 0;
-  let y = clock.ballRadius + 0.12;
+  let y = CONTACT.y;
   let z = 0;
   let vx = vel.x;
   let vy = vel.y;
@@ -403,8 +461,8 @@ export function predictFlight(clock: LivePlay): { x: number; z: number; score: S
   };
 }
 
-function resetActors(sim: PlaySim) {
-  sim.actors = roster();
+function resetActors(sim: PlaySim, hand: BatterHand) {
+  sim.actors = roster(hand);
   sim.waypoint = 0;
   sim.peeled = false;
   sim.hold = 0;
@@ -420,7 +478,7 @@ export function stepPlaySim(sim: PlaySim, clock: LivePlay, dt: number) {
   const step = Math.min(Math.max(dt, 0), 0.05);
   if (sim.nonce !== clock.nonce) {
     sim.nonce = clock.nonce;
-    resetActors(sim);
+    resetActors(sim, clock.hand);
     if (clock.active) {
       const predicted = predictFlight(clock);
       if (predicted) {
@@ -432,6 +490,13 @@ export function stepPlaySim(sim: PlaySim, clock: LivePlay, dt: number) {
   }
 
   for (const actor of sim.actors) actor.moving = false;
+
+  const box = batterBox(clock.hand);
+  const batter = sim.actors.find((actor) => actor.name === 'B');
+  if (batter) {
+    batter.homeX = box.x;
+    batter.homeZ = box.z;
+  }
 
   if (!clock.active) {
     for (const actor of sim.actors) {
@@ -451,7 +516,7 @@ export function stepPlaySim(sim: PlaySim, clock: LivePlay, dt: number) {
   const spotX = clock.landingX ?? sim.predX;
   const spotZ = clock.landingZ ?? sim.predZ;
   const plan = planPlay(play, spotX, spotZ);
-  const fieldSpot = insideFence(spotX, spotZ);
+  const fieldSpot = fieldingSpot(play, spotX, spotZ, clock);
   const released = clock.time >= REACTION_S;
   const runner = sim.actors.find((actor) => actor.name === 'B');
   const primary = sim.actors.find((actor) => actor.name === plan.fielder);
@@ -534,6 +599,20 @@ export function stepPlaySim(sim: PlaySim, clock: LivePlay, dt: number) {
     if (!actor.moving) {
       actor.faceX = clock.ballX - actor.x;
       actor.faceZ = clock.ballZ - actor.z;
+    }
+  }
+
+  if (clock.pitching) {
+    const pitcher = sim.actors.find((actor) => actor.name === 'P');
+    if (pitcher) {
+      const len = Math.hypot(pitcher.homeX, pitcher.homeZ) || 1;
+      moveToward(
+        pitcher,
+        pitcher.homeX - (pitcher.homeX / len) * 0.7,
+        pitcher.homeZ - (pitcher.homeZ / len) * 0.7,
+        3.5,
+        step,
+      );
     }
   }
 

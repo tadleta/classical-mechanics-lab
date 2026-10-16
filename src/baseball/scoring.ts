@@ -212,6 +212,12 @@ function bestCatch(
   return best;
 }
 
+function fairLanding(x: number, z: number): boolean {
+  if (x < -0.3 || z < -0.3) return false;
+  const theta = Math.atan2(z, x);
+  return theta >= -0.02 && theta <= Math.PI / 2 + 0.02;
+}
+
 function groundOutFielder(
   ux: number,
   uz: number,
@@ -229,6 +235,70 @@ function groundOutFielder(
     }
   }
   return best;
+}
+
+export type GroundSpot = {
+  name: string;
+  x: number;
+  z: number;
+  /** Meters from home along the batted-ball ray. */
+  along: number;
+};
+
+/**
+ * Where the infielder fields a ground out: on the ray from home through the
+ * landing, at that fielder's depth. A ball that dies closer is fielded there.
+ * The pitcher stays on the mound or in front of it.
+ * Null when this is not a ground out an infielder can make.
+ */
+export function groundOutSpot(
+  exitVeloMps: number,
+  launchAngleDeg: number,
+  landingX: number,
+  landingZ: number,
+): GroundSpot | null {
+  if (launchAngleDeg >= 10) return null;
+  const carryM = Math.hypot(landingX, landingZ);
+  if (carryM < 0.5 || !fairLanding(landingX, landingZ)) return null;
+  const ux = landingX / carryM;
+  const uz = landingZ / carryM;
+  const horizontal = Math.abs(exitVeloMps * Math.cos((launchAngleDeg * Math.PI) / 180));
+  const play = groundOutFielder(ux, uz, horizontal);
+  if (!play) return null;
+  const fielder = INFIELD.find((candidate) => candidate.name === play.name);
+  if (!fielder) return null;
+  let along = fielder.x * ux + fielder.z * uz;
+  if (play.name === 'P') along = Math.min(along, Math.hypot(fielder.x, fielder.z));
+  along = Math.min(Math.max(along, 0), carryM);
+  return { name: play.name, x: ux * along, z: uz * along, along };
+}
+
+/** A ground ball this high at the fielder has gone over his glove. */
+const GROUND_FIELD_HEIGHT_M = 1.8;
+
+/**
+ * The batted ball has reached the infielder who can record the ground out,
+ * and it is low enough to play. dirX/dirZ is the launch's horizontal direction.
+ */
+export function grounderAtFielder(
+  exitVeloMps: number,
+  launchAngleDeg: number,
+  ballX: number,
+  ballY: number,
+  ballZ: number,
+  dirX: number,
+  dirZ: number,
+): GroundSpot | null {
+  if (ballY >= GROUND_FIELD_HEIGHT_M) return null;
+  const len = Math.hypot(dirX, dirZ);
+  if (len < 1e-3) return null;
+  const ux = dirX / len;
+  const uz = dirZ / len;
+  const alongBall = ballX * ux + ballZ * uz;
+  if (alongBall <= 3) return null;
+  const spot = groundOutSpot(exitVeloMps, launchAngleDeg, ux * 80, uz * 80);
+  if (!spot || alongBall < spot.along) return null;
+  return spot;
 }
 
 function assignedOutfielder(theta: number): Fielder {
@@ -265,7 +335,7 @@ export function scorePlay(input: ScoreInput): Score {
   const hardHit = isHardHit(exitVeloMph);
   const carryM = Math.hypot(input.landingX, input.landingZ);
   const theta = Math.atan2(input.landingZ, input.landingX);
-  const fair = input.landingX >= -0.3 && input.landingZ >= -0.3 && theta >= -0.02 && theta <= Math.PI / 2 + 0.02;
+  const fair = fairLanding(input.landingX, input.landingZ);
   const fenceM = fenceRadiusMeters(fair ? theta : Math.min(Math.PI / 2, Math.max(0, theta)));
   const where = fieldSlice(fair ? theta : Math.PI / 4);
   const base = { hitType, barrel, hardHit, fenceM, carryM };

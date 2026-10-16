@@ -2,7 +2,7 @@ import { useLayoutEffect, useMemo, useRef } from 'react';
 import { Html } from '@react-three/drei';
 import * as THREE from 'three';
 import { fenceRadiusMeters, fieldPoint } from '../baseball/scoring';
-import type { BoardCopy } from '../baseball/playScript';
+import type { BatterHand, BoardCopy } from '../baseball/playScript';
 import {
   GRASS_BAND_WIDTH,
   MAX_SEATS,
@@ -13,7 +13,7 @@ import {
   seatLayout,
 } from '../baseball/stadiumLayout';
 
-const SEAT_COLORS = ['#1d4ed8', '#1e3a8a', '#b91c1c', '#7f1d1d', '#e2e8f0', '#334155', '#0369a1'];
+const SEAT_COLORS = ['#C6011F', '#f8fafc'];
 
 function SeatBowl() {
   const ref = useRef<THREE.InstancedMesh>(null);
@@ -31,7 +31,7 @@ function SeatBowl() {
       dummy.scale.set(1, 1, 1);
       dummy.updateMatrix();
       mesh.setMatrixAt(index, dummy.matrix);
-      color.set(SEAT_COLORS[index % SEAT_COLORS.length]);
+      color.set(SEAT_COLORS[Math.floor(index / 5) % SEAT_COLORS.length]);
       mesh.setColorAt(index, color);
     });
 
@@ -239,7 +239,7 @@ function StadiumBowl() {
 }
 
 /** Decorative bowl, lights, and wall surroundings. None of these are colliders. */
-export function BallparkShell({ board }: { board: BoardCopy }) {
+export function BallparkShell({ board, hand }: { board: BoardCopy; hand: BatterHand }) {
   const towers = lightTowerPositions();
 
   return (
@@ -283,11 +283,19 @@ export function BallparkShell({ board }: { board: BoardCopy }) {
 
       <mesh position={[0.85, 0.07, -0.85]} rotation={[0, Math.PI / 4, 0]}>
         <boxGeometry args={[0.55, 0.03, 1.8]} />
-        <meshStandardMaterial color="#f8fafc" />
+        <meshStandardMaterial
+          color={hand === 'R' ? '#C6011F' : '#f8fafc'}
+          emissive={hand === 'R' ? '#C6011F' : '#000000'}
+          emissiveIntensity={hand === 'R' ? 0.35 : 0}
+        />
       </mesh>
       <mesh position={[-0.85, 0.07, 0.85]} rotation={[0, Math.PI / 4, 0]}>
         <boxGeometry args={[0.55, 0.03, 1.8]} />
-        <meshStandardMaterial color="#f8fafc" />
+        <meshStandardMaterial
+          color={hand === 'L' ? '#C6011F' : '#f8fafc'}
+          emissive={hand === 'L' ? '#C6011F' : '#000000'}
+          emissiveIntensity={hand === 'L' ? 0.35 : 0}
+        />
       </mesh>
     </group>
   );
