@@ -1,19 +1,58 @@
 import { Canvas, useFrame } from '@react-three/fiber';
 import { OrbitControls, Stars, Grid, Trail } from '@react-three/drei';
 import { Physics, RigidBody } from '@react-three/rapier';
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import type { RapierRigidBody } from '@react-three/rapier';
 import * as THREE from 'three';
+import {
+  FOUL_POLE_M,
+  WALL_HEIGHT_M,
+  fenceCross,
+  fenceMetersForSpray,
+  fenceRadiusMeters,
+  fieldPoint,
+  isBarrel,
+  isHardHit,
+  scorePlay,
+  statcastHitType,
+} from '../baseball/scoring';
+import type { PlayKind, Score } from '../baseball/scoring';
+import { MLB_PARK_COUNT, homeRunsByPark } from '../baseball/ballparks';
+import type { ParkResult, TrajectoryPoint } from '../baseball/ballparks';
+import { readHistory, rememberLaunch, writeHistory } from '../baseball/history';
+import type { SavedLaunch } from '../baseball/history';
+import { BallparkShell } from './BallparkShell';
 
 type Mode = 'projectile' | 'baseball';
 
+type LiveStats = {
+  distance: number;
+  height: number;
+  maxHeight: number;
+  time: number;
+};
+
+type FlightSnapshot = {
+  speedMs: number;
+  angle: number;
+  sprayAngle: number;
+  ballRadius: number;
+  mode: Mode;
+};
+
 const BASE_DISTANCE = 27.432; // 90 ft
-const FOUL_LINE = 100.58;     // 330 ft
-const CENTER = 121.92;        // 400 ft
+
+type FlightFacts = {
+  clearedFence: boolean;
+  hitWall: boolean;
+  clearanceHeightM: number | null;
+  trajectory: TrajectoryPoint[];
+};
 
 function SceneContent({
   mode,
   isLaunched,
+  launchNonce,
   speed,
   angle,
   sprayAngle,
@@ -21,27 +60,42 @@ function SceneContent({
   onStatsUpdate,
   onLanded,
   landingPos,
+  markKind,
 }: {
   mode: Mode;
   isLaunched: boolean;
+  launchNonce: number;
   speed: number;
   angle: number;
   sprayAngle: number;
   ballRadius: number;
-  onStatsUpdate: (stats: any) => void;
-  onLanded: (finalStats: any, pos: { x: number; z: number }) => void;
+  onStatsUpdate: (stats: LiveStats) => void;
+  onLanded: (
+    finalStats: LiveStats,
+    pos: { x: number; z: number },
+    flight: FlightFacts,
+    nonce: number,
+  ) => void;
   landingPos: { x: number; z: number } | null;
+  markKind: PlayKind | null;
 }) {
   const bodyRef = useRef<RapierRigidBody>(null);
   const hasLaunched = useRef(false);
   const hasLanded = useRef(false);
   const startTime = useRef(0);
   const maxHeightRef = useRef(0);
+  const prevPos = useRef<{ x: number; y: number; z: number } | null>(null);
+  const clearedFence = useRef(false);
+  const hitWall = useRef(false);
+  const clearanceHeight = useRef<number | null>(null);
+  const trajectory = useRef<TrajectoryPoint[]>([]);
+  const lastDist = useRef(0);
+  const flightNonce = useRef(0);
 
   const launchY = ballRadius + 0.12;
 
   // 0° spray = center field (45° in our coordinate system)
-  const getVelocity = () => {
+  const getVelocity = useCallback(() => {
     const launchRad = (angle * Math.PI) / 180;
     const sprayRad = (sprayAngle * Math.PI) / 180;
     const direction = Math.PI / 4 + sprayRad; // center at 45°
@@ -54,28 +108,49 @@ function SceneContent({
       y: vertical,
       z: horizontal * Math.sin(direction),
     };
-  };
+  }, [speed, angle, sprayAngle]);
 
-  // Launch
+  // Launch. launchNonce changes on every Launch and Reset, so a second flight
+  // starts even when isLaunched is already true. Speed and angle here are the
+  // snapshot from the click, not the live sliders.
   useEffect(() => {
-    if (!isLaunched || !bodyRef.current || hasLaunched.current) return;
+    if (!isLaunched || !bodyRef.current) return;
+
+    flightNonce.current = launchNonce;
+    hasLaunched.current = false;
+    hasLanded.current = false;
+    bodyRef.current.setTranslation({ x: 0, y: launchY, z: 0 }, true);
+    bodyRef.current.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    bodyRef.current.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    prevPos.current = null;
+    clearedFence.current = false;
+    hitWall.current = false;
+    clearanceHeight.current = null;
+    trajectory.current = [];
+    lastDist.current = 0;
+    maxHeightRef.current = 0;
+    startTime.current = performance.now();
 
     const timer = setTimeout(() => {
-      if (bodyRef.current) {
-        const vel = getVelocity();
-        bodyRef.current.setTranslation({ x: 0, y: launchY, z: 0 }, true);
-        bodyRef.current.setLinvel(vel, true);
-        bodyRef.current.setAngvel({ x: 0, y: 0, z: 0 }, true);
-
-        hasLaunched.current = true;
-        hasLanded.current = false;
-        startTime.current = performance.now();
-        maxHeightRef.current = 0;
-      }
+      if (!bodyRef.current) return;
+      const vel = getVelocity();
+      bodyRef.current.setTranslation({ x: 0, y: launchY, z: 0 }, true);
+      bodyRef.current.setLinvel(vel, true);
+      bodyRef.current.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      hasLaunched.current = true;
+      hasLanded.current = false;
+      startTime.current = performance.now();
+      maxHeightRef.current = 0;
+      prevPos.current = null;
+      clearedFence.current = false;
+      hitWall.current = false;
+      clearanceHeight.current = null;
+      trajectory.current = [];
+      lastDist.current = 0;
     }, 50);
 
     return () => clearTimeout(timer);
-  }, [isLaunched, speed, angle, sprayAngle, launchY]);
+  }, [isLaunched, launchNonce, getVelocity, launchY]);
 
   // Reset
   useEffect(() => {
@@ -85,12 +160,18 @@ function SceneContent({
       bodyRef.current.setAngvel({ x: 0, y: 0, z: 0 }, true);
       hasLaunched.current = false;
       hasLanded.current = false;
+      prevPos.current = null;
+      clearedFence.current = false;
+      hitWall.current = false;
+      clearanceHeight.current = null;
+      trajectory.current = [];
+      lastDist.current = 0;
     }
   }, [isLaunched, launchY]);
 
   // Physics + drag + landing
   useFrame((_, delta) => {
-    if (!bodyRef.current || !isLaunched) return;
+    if (!bodyRef.current || !isLaunched || !hasLaunched.current) return;
 
     const pos = bodyRef.current.translation();
     const vel = bodyRef.current.linvel();
@@ -108,6 +189,30 @@ function SceneContent({
       maxHeight: maxHeightRef.current,
       time,
     };
+
+    if (mode === 'baseball' && !clearedFence.current && !hitWall.current && prevPos.current) {
+      const prev = prevPos.current;
+      const cross = fenceCross(prev.x, prev.y, prev.z, pos.x, pos.y, pos.z, ballRadius);
+      if (cross?.cleared) {
+        clearedFence.current = true;
+        clearanceHeight.current = cross.clearanceHeightM;
+      } else if (cross?.hitWall) {
+        hitWall.current = true;
+      }
+    }
+    prevPos.current = { x: pos.x, y: pos.y, z: pos.z };
+
+    if (mode === 'baseball' && !hasLanded.current && dist + 0.01 >= lastDist.current) {
+      trajectory.current.push({ distM: dist, bottomM: pos.y - ballRadius });
+      lastDist.current = dist;
+    }
+
+    const flightFacts = (): FlightFacts => ({
+      clearedFence: clearedFence.current,
+      hitWall: hitWall.current,
+      clearanceHeightM: clearanceHeight.current,
+      trajectory: trajectory.current.slice(),
+    });
 
     // ===== Proper Quadratic Air Drag =====
 if (!hasLanded.current && mode === 'baseball') {
@@ -162,7 +267,7 @@ if (!hasLanded.current) {
     bodyRef.current.setTranslation({ x: landX, y: ballRadius, z: landZ }, true);
 
     hasLanded.current = true;
-    onLanded(currentStats, { x: landX, z: landZ });
+    onLanded(currentStats, { x: landX, z: landZ }, flightFacts(), flightNonce.current);
   }
 
   // Safety net only
@@ -175,7 +280,7 @@ if (!hasLanded.current) {
     bodyRef.current.setTranslation({ x: landX, y: ballRadius, z: landZ }, true);
 
     hasLanded.current = true;
-    onLanded(currentStats, { x: landX, z: landZ });
+    onLanded(currentStats, { x: landX, z: landZ }, flightFacts(), flightNonce.current);
   }
 }
   });
@@ -207,16 +312,8 @@ if (!hasLanded.current) {
     const segments = 64;
 
     for (let i = 0; i <= segments; i++) {
-      const t = i / segments;
-      const theta = t * (Math.PI / 2); // 0 → 90°
-
-      // Deeper in center field
-      const radius =
-        FOUL_LINE + (CENTER - FOUL_LINE) * Math.sin(theta * 2) * 0.85 + (CENTER - FOUL_LINE) * 0.15;
-
-      const x = radius * Math.cos(theta);
-      const z = radius * Math.sin(theta);
-      points.push([x, 0, z]);
+      const theta = (i / segments) * (Math.PI / 2); // 0° left-field line → 90° right-field line
+      points.push(fieldPoint(theta, fenceRadiusMeters(theta)));
     }
     return points;
   }, []);
@@ -234,14 +331,23 @@ if (!hasLanded.current) {
     const dz = end[2] - start[2];
     const length = Math.sqrt(dx * dx + dz * dz);
     const rot = Math.atan2(dx, dz);
+    const inward = Math.hypot(midX, midZ) || 1;
+    const nx = midX / inward;
+    const nz = midZ / inward;
 
     return (
-      <RigidBody type="fixed" position={[midX, 2, midZ]}>
-        <mesh rotation={[0, rot, 0]}>
-          <boxGeometry args={[0.32, 4, length + 0.05]} />
-          <meshStandardMaterial color="#334155" />
+      <group>
+        <RigidBody type="fixed" position={[midX, WALL_HEIGHT_M / 2, midZ]}>
+          <mesh rotation={[0, rot, 0]}>
+            <boxGeometry args={[0.32, WALL_HEIGHT_M, length + 0.05]} />
+            <meshStandardMaterial color="#14532d" />
+          </mesh>
+        </RigidBody>
+        <mesh position={[midX + nx * 0.4, WALL_HEIGHT_M + 0.1, midZ + nz * 0.4]} rotation={[0, rot, 0]}>
+          <boxGeometry args={[0.45, 0.18, length + 0.08]} />
+          <meshStandardMaterial color="#facc15" />
         </mesh>
-      </RigidBody>
+      </group>
     );
   };
 
@@ -258,10 +364,13 @@ if (!hasLanded.current) {
     </group>
   );
 
+  const markColor =
+    markKind === 'hr' ? '#facc15' : markKind === 'hit' ? '#4ade80' : markKind === 'foul' ? '#fb923c' : '#e2e8f0';
+
   return (
     <>
-      <ambientLight intensity={0.5} />
-      <directionalLight position={[50, 60, 30]} intensity={1.3} castShadow />
+      <ambientLight intensity={mode === 'baseball' ? 0.32 : 0.5} />
+      <directionalLight position={[50, 60, 30]} intensity={mode === 'baseball' ? 0.55 : 1.3} castShadow />
 
       <Physics gravity={[0, -9.81, 0]}>
         {/* Ground */}
@@ -333,14 +442,14 @@ if (!hasLanded.current) {
             {/* White foul lines (baselines) */}
 
             {/* Left field line (along +X) */}
-            <mesh position={[FOUL_LINE / 2, 0.04, 0]} rotation={[0, 0, 0]}>
-              <boxGeometry args={[FOUL_LINE, 0.06, 0.35]} />
+            <mesh position={[FOUL_POLE_M / 2, 0.04, 0]} rotation={[0, 0, 0]}>
+              <boxGeometry args={[FOUL_POLE_M, 0.06, 0.35]} />
               <meshStandardMaterial color="#f8fafc" />
             </mesh>
 
             {/* Right field line (along +Z) */}
-            <mesh position={[0, 0.04, FOUL_LINE / 2]} rotation={[0, Math.PI / 2, 0]}>
-              <boxGeometry args={[FOUL_LINE, 0.06, 0.35]} />
+            <mesh position={[0, 0.04, FOUL_POLE_M / 2]} rotation={[0, Math.PI / 2, 0]}>
+              <boxGeometry args={[FOUL_POLE_M, 0.06, 0.35]} />
               <meshStandardMaterial color="#f8fafc" />
             </mesh>
 
@@ -350,8 +459,8 @@ if (!hasLanded.current) {
             ))}
 
             {/* Foul Poles */}
-            <FoulPole position={[FOUL_LINE, 0, 0]} />
-            <FoulPole position={[0, 0, FOUL_LINE]} />
+            <FoulPole position={[FOUL_POLE_M, 0, 0]} />
+            <FoulPole position={[0, 0, FOUL_POLE_M]} />
           </>
         )}
 
@@ -381,7 +490,7 @@ if (!hasLanded.current) {
           restitution={0}
           friction={0.9}
         >
-          <Trail width={0.9} length={18} color="#fb7185" attenuation={(t) => t * 0.9}>
+          <Trail key={launchNonce} width={0.9} length={18} color="#fb7185" attenuation={(t) => t * 0.9}>
             <mesh castShadow>
               <sphereGeometry args={[ballRadius]} />
               <meshStandardMaterial
@@ -394,19 +503,31 @@ if (!hasLanded.current) {
         </RigidBody>
       </Physics>
 
-      {landingPos && <LandingMarker x={landingPos.x} z={landingPos.z} />}
+      {mode === 'baseball' && <BallparkShell />}
 
-      <Grid
-        args={[400, 400]}
-        cellSize={5}
-        cellThickness={0.35}
-        cellColor="#334155"
-        sectionSize={25}
-        sectionThickness={0.9}
-        sectionColor="#475569"
-        fadeDistance={300}
-        position={[0, 0.02, 0]}
-      />
+      {landingPos && mode === 'projectile' && <LandingMarker x={landingPos.x} z={landingPos.z} />}
+      {landingPos && mode === 'baseball' && (
+        <mesh position={[landingPos.x, 0.12, landingPos.z]} rotation={[-Math.PI / 2, 0, 0]}>
+          <ringGeometry args={[1.6, 2.8, 40]} />
+          <meshStandardMaterial color={markColor} emissive={markColor} emissiveIntensity={0.55} />
+        </mesh>
+      )}
+
+      {mode === 'baseball' ? (
+        <color attach="background" args={['#020617']} />
+      ) : (
+        <Grid
+          args={[400, 400]}
+          cellSize={5}
+          cellThickness={0.35}
+          cellColor="#334155"
+          sectionSize={25}
+          sectionThickness={0.9}
+          sectionColor="#475569"
+          fadeDistance={300}
+          position={[0, 0.02, 0]}
+        />
+      )}
 
       <OrbitControls
         target={mode === 'baseball' ? [34, 4, 35] : [20, 5, 0]}
@@ -415,20 +536,218 @@ if (!hasLanded.current) {
         enableRotate
         maxPolarAngle={Math.PI / 2.05}
       />
-      <Stars radius={500} depth={80} count={3500} factor={3} fade />
+      {mode !== 'baseball' && <Stars radius={500} depth={80} count={3500} factor={3} fade />}
     </>
   );
 }
 
+function ParkList({ title, parks }: { title: string; parks: ParkResult[] }) {
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div style={{ fontSize: 11, letterSpacing: 0.4, textTransform: 'uppercase', color: '#a1a1aa', marginBottom: 4 }}>
+        {title}
+      </div>
+      {parks.length === 0 ? (
+        <div style={{ fontSize: 12, color: '#71717a' }}>None</div>
+      ) : (
+        parks.map((park) => (
+          <div
+            key={park.name}
+            style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 12, lineHeight: 1.35, padding: '3px 0' }}
+          >
+            <span style={{ color: park.homeRun ? '#facc15' : '#e4e4e7' }}>
+              {park.name}
+              <span style={{ color: '#71717a' }}> · {park.team}</span>
+            </span>
+            <span style={{ color: '#71717a', fontFamily: 'monospace', flexShrink: 0 }}>
+              {Math.round(park.fenceFt)} ft{park.wallFt >= 12 ? `, ${Math.round(park.wallFt)} ft wall` : ''}
+            </span>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+function contactLabel(barrel: boolean, hardHit: boolean) {
+  if (barrel) return 'Barrel';
+  if (hardHit) return 'Hard hit';
+  return 'Normal';
+}
+
+function HistoryList({
+  launches,
+  openId,
+  parksId,
+  onToggle,
+  onToggleParks,
+}: {
+  launches: SavedLaunch[];
+  openId: string | null;
+  parksId: string | null;
+  onToggle: (id: string) => void;
+  onToggleParks: (id: string) => void;
+}) {
+  const metersToFeet = (meters: number) => meters * 3.28084;
+  const msToMph = (ms: number) => ms / 0.44704;
+
+  return (
+    <div style={{ borderTop: '1px solid #3f3f46', marginTop: 14, paddingTop: 14 }}>
+      <div style={{ fontSize: 11, letterSpacing: 1, textTransform: 'uppercase', color: '#71717a', marginBottom: 8 }}>
+        Previous launches ({launches.length}/10)
+      </div>
+      {launches.length === 0 ? (
+        <div style={{ fontSize: 12, color: '#71717a', lineHeight: 1.45 }}>
+          Finished flights in this tab show up here, including the ballpark breakdown.
+        </div>
+      ) : (
+        launches.map((launch) => {
+          const open = openId === launch.id;
+          const when = new Date(launch.at).toLocaleTimeString([], {
+            hour: 'numeric',
+            minute: '2-digit',
+            second: '2-digit',
+          });
+          const distance =
+            launch.mode === 'baseball'
+              ? `${metersToFeet(launch.distanceM).toFixed(0)} ft`
+              : `${launch.distanceM.toFixed(1)} m`;
+          const setup =
+            launch.mode === 'baseball'
+              ? `${msToMph(launch.speedMs).toFixed(0)} mph · ${launch.angle}°`
+              : `${launch.speedMs.toFixed(1)} m/s · ${launch.angle}°`;
+          const outcome = launch.play?.result ?? 'Landed';
+          const homeRuns = launch.parks?.filter((park) => park.homeRun) ?? [];
+          const stayedIn = launch.parks?.filter((park) => !park.homeRun) ?? [];
+          const parksOpen = parksId === launch.id;
+
+          return (
+            <div key={launch.id} style={{ borderTop: '1px solid #27272a', padding: '8px 0' }}>
+              <button
+                type="button"
+                aria-expanded={open}
+                onClick={() => onToggle(launch.id)}
+                style={{
+                  width: '100%',
+                  background: 'transparent',
+                  color: 'white',
+                  border: 'none',
+                  padding: 0,
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  fontSize: 12,
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                  <span>{when}</span>
+                  <span aria-hidden="true">{open ? '▾' : '▸'}</span>
+                </div>
+                <div style={{ color: '#a1a1aa', marginTop: 2, lineHeight: 1.35 }}>
+                  {launch.mode === 'baseball' ? 'Baseball' : 'Projectile'} · {setup} · {outcome} · {distance}
+                </div>
+              </button>
+              {open && (
+                <div style={{ marginTop: 8, fontSize: 12 }}>
+                  {launch.mode === 'baseball' ? (
+                    <>
+                      <HistoryRow label="Exit velocity" value={`${msToMph(launch.speedMs).toFixed(0)} mph`} />
+                      <HistoryRow label="Launch angle" value={`${launch.angle}°`} />
+                      <HistoryRow label="Spray" value={`${launch.sprayAngle}°`} />
+                      <HistoryRow label="Hit type" value={launch.play?.hitType ?? '—'} />
+                      <HistoryRow
+                        label="Contact"
+                        value={launch.play ? contactLabel(launch.play.barrel, launch.play.hardHit) : '—'}
+                      />
+                      <HistoryRow
+                        label="Fence"
+                        value={launch.play ? `${metersToFeet(launch.play.fenceM).toFixed(0)} ft` : '—'}
+                      />
+                    </>
+                  ) : (
+                    <>
+                      <HistoryRow label="Speed" value={`${launch.speedMs.toFixed(1)} m/s`} />
+                      <HistoryRow label="Angle" value={`${launch.angle}°`} />
+                      <HistoryRow label="Radius" value={`${launch.ballRadius.toFixed(2)} m`} />
+                    </>
+                  )}
+                  <HistoryRow label="Distance" value={distance} />
+                  <HistoryRow
+                    label="Max height"
+                    value={
+                      launch.mode === 'baseball'
+                        ? `${metersToFeet(launch.maxHeightM).toFixed(0)} ft`
+                        : `${launch.maxHeightM.toFixed(1)} m`
+                    }
+                  />
+                  <HistoryRow label="Hang time" value={`${launch.hangTimeS.toFixed(2)} s`} />
+                  {launch.play && (
+                    <p style={{ color: '#d4d4d8', lineHeight: 1.45, margin: '8px 0 0' }}>{launch.play.reason}</p>
+                  )}
+                  {launch.parks && (
+                    <div style={{ marginTop: 8 }}>
+                      <button
+                        type="button"
+                        aria-expanded={parksOpen}
+                        onClick={() => onToggleParks(launch.id)}
+                        style={{
+                          width: '100%',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          gap: 8,
+                          background: '#27272a',
+                          color: 'white',
+                          border: '1px solid #3f3f46',
+                          borderRadius: 8,
+                          padding: '8px 10px',
+                          cursor: 'pointer',
+                          fontSize: 12,
+                          textAlign: 'left',
+                        }}
+                      >
+                        <span>
+                          Home Run in {homeRuns.length}/{launch.parks.length || MLB_PARK_COUNT} Ballparks
+                        </span>
+                        <span aria-hidden="true">{parksOpen ? '▾' : '▸'}</span>
+                      </button>
+                      {parksOpen && (
+                        <div style={{ marginTop: 8 }}>
+                          <ParkList title="Home run" parks={homeRuns} />
+                          <ParkList title="Not a home run" parks={stayedIn} />
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
+function HistoryRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 4 }}>
+      <span style={{ color: '#a1a1aa' }}>{label}</span>
+      <span style={{ fontFamily: 'monospace' }}>{value}</span>
+    </div>
+  );
+}
+
 export function CanvasScene() {
-  const [mode, setMode] = useState<Mode>('projectile');
+  const [mode, setMode] = useState<Mode>('baseball');
   const [isLaunched, setIsLaunched] = useState(false);
   const [hasLanded, setHasLanded] = useState(false);
+  const [launchNonce, setLaunchNonce] = useState(0);
+  const activeNonce = useRef(0);
 
-  const [speedMs, setSpeedMs] = useState(16);
-  const [angle, setAngle] = useState(45);
+  const [speedMs, setSpeedMs] = useState(95 * 0.44704);
+  const [angle, setAngle] = useState(25);
   const [sprayAngle, setSprayAngle] = useState(0);
-  const [ballRadius, setBallRadius] = useState(0.55);
+  const [ballRadius, setBallRadius] = useState(0.037);
 
   const [stats, setStats] = useState({
     distance: 0,
@@ -436,47 +755,130 @@ export function CanvasScene() {
     maxHeight: 0,
     time: 0,
   });
-  const [finalResult, setFinalResult] = useState<any>(null);
+  const [finalResult, setFinalResult] = useState<LiveStats | null>(null);
   const [landingPos, setLandingPos] = useState<{ x: number; z: number } | null>(null);
+  const [play, setPlay] = useState<Score | null>(null);
+  const [parkReport, setParkReport] = useState<ParkResult[] | null>(null);
+  const [parksOpen, setParksOpen] = useState(false);
+  const [flightInputs, setFlightInputs] = useState<FlightSnapshot | null>(null);
+  const flightInputsRef = useRef<FlightSnapshot | null>(null);
+  const [history, setHistory] = useState<SavedLaunch[]>(() => readHistory());
+  const [openLaunchId, setOpenLaunchId] = useState<string | null>(null);
+  const [historyParksFor, setHistoryParksFor] = useState<string | null>(null);
+
+  useEffect(() => {
+    writeHistory(history);
+  }, [history]);
 
   const mphToMs = (mph: number) => mph * 0.44704;
   const msToMph = (ms: number) => ms / 0.44704;
   const metersToFeet = (m: number) => m * 3.28084;
 
-  const launch = () => {
-    if (!isLaunched) {
-      setIsLaunched(true);
-      setHasLanded(false);
-      setFinalResult(null);
-      setLandingPos(null);
-    }
-  };
-
-  const reset = () => {
-    setIsLaunched(false);
+  const clearFlightReadout = () => {
     setHasLanded(false);
     setFinalResult(null);
     setLandingPos(null);
+    setPlay(null);
+    setParkReport(null);
+    setParksOpen(false);
     setStats({ distance: 0, height: 0, maxHeight: 0, time: 0 });
   };
 
-  const handleLanded = (finalStats: any, pos: { x: number; z: number }) => {
+  const launch = () => {
+    const next = activeNonce.current + 1;
+    activeNonce.current = next;
+    const snapshot: FlightSnapshot = { speedMs, angle, sprayAngle, ballRadius, mode };
+    flightInputsRef.current = snapshot;
+    setFlightInputs(snapshot);
+    setLaunchNonce(next);
+    setIsLaunched(true);
+    clearFlightReadout();
+  };
+
+  const reset = () => {
+    const next = activeNonce.current + 1;
+    activeNonce.current = next;
+    flightInputsRef.current = null;
+    setFlightInputs(null);
+    setLaunchNonce(next);
+    setIsLaunched(false);
+    clearFlightReadout();
+  };
+
+  const handleLanded = (
+    finalStats: LiveStats,
+    pos: { x: number; z: number },
+    flight: FlightFacts,
+    nonce: number,
+  ) => {
+    if (nonce !== activeNonce.current) return;
+    const inputs = flightInputsRef.current;
+    if (!inputs) return;
+
+    const scored =
+      inputs.mode === 'baseball'
+        ? scorePlay({
+            exitVeloMps: inputs.speedMs,
+            launchAngleDeg: inputs.angle,
+            landingX: pos.x,
+            landingZ: pos.z,
+            hangTimeS: finalStats.time,
+            clearedFence: flight.clearedFence,
+            hitWall: flight.hitWall,
+            clearanceHeightM: flight.clearanceHeightM,
+          })
+        : null;
+    const parks = inputs.mode === 'baseball' ? homeRunsByPark(pos.x, pos.z, flight.trajectory) : null;
+
     setHasLanded(true);
     setFinalResult(finalStats);
     setLandingPos(pos);
+    setPlay(scored);
+    setParkReport(parks);
+    setParksOpen(false);
+    setHistory((existing) =>
+      rememberLaunch(existing, {
+        id: `${nonce}-${finalStats.time.toFixed(3)}-${inputs.mode}`,
+        at: Date.now(),
+        mode: inputs.mode,
+        speedMs: inputs.speedMs,
+        angle: inputs.angle,
+        sprayAngle: inputs.sprayAngle,
+        ballRadius: inputs.ballRadius,
+        distanceM: finalStats.distance,
+        maxHeightM: finalStats.maxHeight,
+        hangTimeS: finalStats.time,
+        play: scored,
+        parks,
+      }),
+    );
   };
 
-  const getOutcome = () => {
-    if (!finalResult) return '—';
-    const distFt = metersToFeet(finalResult.distance);
+  const homeRunParks = parkReport?.filter((park) => park.homeRun) ?? [];
+  const otherParks = parkReport?.filter((park) => !park.homeRun) ?? [];
 
-    if (angle < 5) return 'Ground Ball';
-    if (angle < 17) return 'Line Drive';
-    if (distFt >= 380) return 'Home Run';
-    if (distFt >= 320) return 'Deep Fly Ball';
-    if (distFt >= 250) return 'Fly Ball';
-    return 'Infield / Short';
-  };
+  const flightSpeed = flightInputs?.speedMs ?? speedMs;
+  const flightAngle = flightInputs?.angle ?? angle;
+  const flightSpray = flightInputs?.sprayAngle ?? sprayAngle;
+  const flightRadius = flightInputs?.ballRadius ?? ballRadius;
+  const exitMph = msToMph(flightSpeed);
+  const hitType = play?.hitType ?? statcastHitType(flightAngle);
+  const contact = (play ? play.barrel : isBarrel(exitMph, flightAngle))
+    ? 'Barrel'
+    : (play ? play.hardHit : isHardHit(exitMph))
+      ? 'Hard hit'
+      : 'Normal';
+  const fenceMeters = hasLanded && play ? play.fenceM : fenceMetersForSpray(flightSpray);
+  const resultColor =
+    !hasLanded || !play
+      ? '#a1a1aa'
+      : play.kind === 'hr'
+        ? '#facc15'
+        : play.kind === 'hit'
+          ? '#4ade80'
+          : play.kind === 'foul'
+            ? '#fb923c'
+            : '#e2e8f0';
 
   return (
     <div className="absolute inset-0 w-full h-full">
@@ -484,13 +886,15 @@ export function CanvasScene() {
         <SceneContent
           mode={mode}
           isLaunched={isLaunched}
-          speed={speedMs}
-          angle={angle}
-          sprayAngle={sprayAngle}
-          ballRadius={ballRadius}
+          launchNonce={launchNonce}
+          speed={flightSpeed}
+          angle={flightAngle}
+          sprayAngle={flightSpray}
+          ballRadius={flightRadius}
           onStatsUpdate={setStats}
           onLanded={handleLanded}
           landingPos={landingPos}
+          markKind={play?.kind ?? null}
         />
       </Canvas>
 
@@ -504,7 +908,9 @@ export function CanvasScene() {
           padding: 20,
           borderRadius: 12,
           border: '1px solid #3f3f46',
-          width: 340,
+          width: 360,
+          maxHeight: 'calc(100% - 40px)',
+          overflowY: 'auto',
           zIndex: 50,
           color: 'white',
           fontFamily: 'system-ui, sans-serif',
@@ -532,7 +938,6 @@ export function CanvasScene() {
                 setBallRadius(0.55);
               }
             }}
-            disabled={isLaunched}
             style={{
               width: '100%',
               padding: '8px 10px',
@@ -564,7 +969,6 @@ export function CanvasScene() {
                   max={130}
                   value={msToMph(speedMs)}
                   onChange={(e) => setSpeedMs(mphToMs(Number(e.target.value)))}
-                  disabled={isLaunched}
                   style={{ width: '100%', accentColor: '#22d3ee' }}
                 />
               </div>
@@ -579,7 +983,6 @@ export function CanvasScene() {
                   max={80}
                   value={angle}
                   onChange={(e) => setAngle(Number(e.target.value))}
-                  disabled={isLaunched}
                   style={{ width: '100%', accentColor: '#22d3ee' }}
                 />
               </div>
@@ -594,7 +997,6 @@ export function CanvasScene() {
                   max={45}
                   value={sprayAngle}
                   onChange={(e) => setSprayAngle(Number(e.target.value))}
-                  disabled={isLaunched}
                   style={{ width: '100%', accentColor: '#22d3ee' }}
                 />
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#71717a', marginTop: 2 }}>
@@ -616,7 +1018,6 @@ export function CanvasScene() {
                   max={30}
                   value={speedMs}
                   onChange={(e) => setSpeedMs(Number(e.target.value))}
-                  disabled={isLaunched}
                   style={{ width: '100%', accentColor: '#22d3ee' }}
                 />
               </div>
@@ -630,7 +1031,6 @@ export function CanvasScene() {
                   max={75}
                   value={angle}
                   onChange={(e) => setAngle(Number(e.target.value))}
-                  disabled={isLaunched}
                   style={{ width: '100%', accentColor: '#22d3ee' }}
                 />
               </div>
@@ -651,7 +1051,6 @@ export function CanvasScene() {
               step={0.05}
               value={ballRadius}
               onChange={(e) => setBallRadius(Number(e.target.value))}
-              disabled={isLaunched}
               style={{ width: '100%', accentColor: '#22d3ee' }}
             />
           </div>
@@ -660,16 +1059,15 @@ export function CanvasScene() {
         <div style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
           <button
             onClick={launch}
-            disabled={isLaunched}
             style={{
               flex: 1,
               padding: '10px 0',
-              background: isLaunched ? '#3f3f46' : '#dc2626',
+              background: '#dc2626',
               border: 'none',
               borderRadius: 8,
               color: 'white',
               fontWeight: 500,
-              cursor: isLaunched ? 'not-allowed' : 'pointer',
+              cursor: 'pointer',
             }}
           >
             Launch
@@ -690,17 +1088,32 @@ export function CanvasScene() {
             Reset
           </button>
         </div>
+        <p style={{ color: '#71717a', fontSize: 11, lineHeight: 1.45, margin: '-8px 0 16px' }}>
+          Change the sliders and launch again. The ball resets on its own, and the last ten finished flights stay in this tab.
+        </p>
 
         <div style={{ borderTop: '1px solid #3f3f46', paddingTop: 14, fontSize: 13 }}>
           {mode === 'baseball' ? (
             <>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
                 <span style={{ color: '#a1a1aa' }}>Exit Velocity</span>
-                <span style={{ fontFamily: 'monospace' }}>{msToMph(speedMs).toFixed(0)} mph</span>
+                <span style={{ fontFamily: 'monospace' }}>{msToMph(flightSpeed).toFixed(0)} mph</span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
                 <span style={{ color: '#a1a1aa' }}>Launch Angle</span>
-                <span style={{ fontFamily: 'monospace' }}>{angle}°</span>
+                <span style={{ fontFamily: 'monospace' }}>{flightAngle}°</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                <span style={{ color: '#a1a1aa' }}>Hit type</span>
+                <span style={{ fontFamily: 'monospace' }}>{hitType}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                <span style={{ color: '#a1a1aa' }}>Contact</span>
+                <span style={{ fontFamily: 'monospace' }}>{contact}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                <span style={{ color: '#a1a1aa' }}>Fence</span>
+                <span style={{ fontFamily: 'monospace' }}>{metersToFeet(fenceMeters).toFixed(0)} ft</span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
                 <span style={{ color: '#a1a1aa' }}>Distance</span>
@@ -722,10 +1135,49 @@ export function CanvasScene() {
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 12, paddingTop: 10, borderTop: '1px solid #3f3f46' }}>
                 <span style={{ color: '#a1a1aa' }}>Result</span>
-                <span style={{ fontFamily: 'monospace', color: hasLanded ? '#4ade80' : '#a1a1aa' }}>
-                  {hasLanded ? getOutcome() : 'In flight…'}
+                <span style={{ fontFamily: 'monospace', color: resultColor }}>
+                  {!isLaunched ? 'Ready' : hasLanded && play ? play.result : 'In flight…'}
                 </span>
               </div>
+              {hasLanded && play && (
+                <p style={{ color: '#d4d4d8', fontSize: 12, lineHeight: 1.45, margin: '10px 0 0' }}>{play.reason}</p>
+              )}
+              {hasLanded && parkReport && (
+                <div style={{ marginTop: 12 }}>
+                  <button
+                    type="button"
+                    aria-expanded={parksOpen}
+                    onClick={() => setParksOpen((open) => !open)}
+                    style={{
+                      width: '100%',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      gap: 8,
+                      background: '#27272a',
+                      color: 'white',
+                      border: '1px solid #3f3f46',
+                      borderRadius: 8,
+                      padding: '8px 10px',
+                      cursor: 'pointer',
+                      fontSize: 13,
+                      textAlign: 'left',
+                    }}
+                  >
+                    <span>Home Run in {homeRunParks.length}/{MLB_PARK_COUNT} Ballparks</span>
+                    <span aria-hidden="true">{parksOpen ? '▾' : '▸'}</span>
+                  </button>
+                  {parksOpen && (
+                    <div style={{ marginTop: 8 }}>
+                      <ParkList title="Home run" parks={homeRunParks} />
+                      <ParkList title="Not a home run" parks={otherParks} />
+                    </div>
+                  )}
+                </div>
+              )}
+              <p style={{ color: '#71717a', fontSize: 11, lineHeight: 1.45, margin: '10px 0 0' }}>
+                A home run here has to clear this fence (about 340 ft down the lines, 400 ft in center, 13 ft wall). The 30 ballparks are the real 2026 MLB fences, scored from this same flight. Hit type is the Statcast launch-angle band. Balls that stay in are scored against an average MLB defense: typical depths, a 27 ft/s sprint, and a 0.45 s jump. The ring marks where it came down.
+              </p>
             </>
           ) : (
             <>
@@ -748,6 +1200,16 @@ export function CanvasScene() {
             </>
           )}
         </div>
+        <HistoryList
+          launches={history}
+          openId={openLaunchId}
+          parksId={historyParksFor}
+          onToggle={(id) => {
+            setOpenLaunchId((current) => (current === id ? null : id));
+            setHistoryParksFor(null);
+          }}
+          onToggleParks={(id) => setHistoryParksFor((current) => (current === id ? null : id))}
+        />
       </div>
     </div>
   );

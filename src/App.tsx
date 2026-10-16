@@ -6,7 +6,7 @@ function App() {
       {/* Header */}
       <header className="border-b border-zinc-800 px-6 py-4 flex-shrink-0">
         <h1 className="text-2xl font-bold">Classical Mechanics Lab</h1>
-        <p className="text-zinc-400 text-sm mt-1">Interactive Projectile & Physics Simulator</p>
+        <p className="text-zinc-400 text-sm mt-1">Batted-ball and projectile simulator</p>
       </header>
 
       {/* Main area - takes remaining space but with a little breathing room */}
